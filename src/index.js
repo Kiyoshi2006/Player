@@ -1,5 +1,11 @@
+/**
+ * /src/index.js
+ * Cloudflare Worker
+ * libmedia UMD MKV player + Loli Service Binding + debug logging.
+ */
+
 const LIBMEDIA_VERSION = "1.3.1";
-const DEBUG_VERSION = "3";
+const DEBUG_VERSION = "4";
 
 const SOURCE_URL =
   "https://loli.nvnyep.workers.dev/13102006/Colab_Torrent_Uploads/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01E01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D.mkv";
@@ -221,9 +227,19 @@ async function proxyWasm(request, path) {
   });
 }
 
+function buildUpstreamHeaders(request) {
+  const headers = new Headers(request.headers);
+
+  headers.delete("host");
+  headers.delete("connection");
+  headers.delete("content-length");
+
+  return headers;
+}
+
 async function proxyMedia(request, env) {
   const requestHeaders =
-    new Headers(request.headers);
+    buildUpstreamHeaders(request);
 
   const range =
     requestHeaders.get("range");
@@ -231,26 +247,16 @@ async function proxyMedia(request, env) {
   const accept =
     requestHeaders.get("accept");
 
-  const contentType =
-    requestHeaders.get("content-type");
+  console.log(
+    JSON.stringify({
+      event: "MEDIA_REQUEST",
+      method: request.method,
+      range: range || null,
+      accept: accept || null,
+    }),
+  );
 
-  const userAgent =
-    requestHeaders.get("user-agent");
-
-  const requestDebug = {
-    event: "MEDIA_REQUEST",
-    method: request.method,
-    range: range || null,
-    accept: accept || null,
-    contentType: contentType || null,
-    userAgent: userAgent || null,
-  };
-
-  console.log(JSON.stringify(requestDebug));
-
-  requestHeaders.delete("host");
-
-  const response = await env.LOLI.fetch(
+  const upstreamRequest = new Request(
     SOURCE_URL,
     {
       method: request.method,
@@ -258,27 +264,44 @@ async function proxyMedia(request, env) {
     },
   );
 
-  const responseDebug = {
-    event: "MEDIA_RESPONSE",
-    method: request.method,
-    requestRange: range || null,
-    status: response.status,
-    statusText: response.statusText,
-    contentType:
-      response.headers.get("content-type"),
-    contentLength:
-      response.headers.get("content-length"),
-    contentRange:
-      response.headers.get("content-range"),
-    acceptRanges:
-      response.headers.get("accept-ranges"),
-    contentEncoding:
-      response.headers.get("content-encoding"),
-    etag:
-      response.headers.get("etag"),
-  };
+  const response =
+    await env.LOLI.fetch(
+      upstreamRequest,
+    );
 
-  console.log(JSON.stringify(responseDebug));
+  const contentType =
+    response.headers.get(
+      "content-type",
+    );
+
+  const contentLength =
+    response.headers.get(
+      "content-length",
+    );
+
+  const contentRange =
+    response.headers.get(
+      "content-range",
+    );
+
+  const acceptRanges =
+    response.headers.get(
+      "accept-ranges",
+    );
+
+  console.log(
+    JSON.stringify({
+      event: "MEDIA_RESPONSE",
+      method: request.method,
+      requestRange: range || null,
+      status: response.status,
+      statusText: response.statusText,
+      contentType,
+      contentLength,
+      contentRange,
+      acceptRanges,
+    }),
+  );
 
   const outputHeaders =
     new Headers(response.headers);
@@ -326,9 +349,7 @@ async function proxyMedia(request, env) {
 
   outputHeaders.set(
     "X-Debug-Media-Content-Range",
-    response.headers.get(
-      "content-range",
-    ) || "none",
+    contentRange || "none",
   );
 
   return new Response(response.body, {
@@ -338,28 +359,43 @@ async function proxyMedia(request, env) {
   });
 }
 
-async function checkLoli(env) {
-  const ranges = [
+async function debugMedia(env) {
+  const testRanges = [
     "bytes=0-1023",
-    "bytes=1024-2047",
-    "bytes=0-65535",
+    "bytes=40-4387",
+    "bytes=4388-65535",
   ];
 
   const results = [];
 
-  for (const range of ranges) {
-    const response =
-      await env.LOLI.fetch(
+  for (const range of testRanges) {
+    const headers = new Headers();
+
+    headers.set(
+      "Range",
+      range,
+    );
+
+    headers.set(
+      "Accept",
+      "*/*",
+    );
+
+    const upstreamRequest =
+      new Request(
         SOURCE_URL,
         {
           method: "GET",
-          headers: {
-            Range: range,
-          },
+          headers,
         },
       );
 
-    results.push({
+    const response =
+      await env.LOLI.fetch(
+        upstreamRequest,
+      );
+
+    const result = {
       requestedRange: range,
       status: response.status,
       statusText:
@@ -380,16 +416,76 @@ async function checkLoli(env) {
         response.headers.get(
           "accept-ranges",
         ),
-    });
+    };
+
+    console.log(
+      JSON.stringify({
+        event: "DEBUG_RANGE_TEST",
+        ...result,
+      }),
+    );
+
+    results.push(result);
+
+    if (response.body) {
+      await response.body.cancel();
+    }
   }
 
   return Response.json(
     {
       ok: results.every(
-        (item) => item.status === 206,
+        (result) =>
+          result.status === 206 &&
+          result.contentRange !== null,
       ),
-      source: SOURCE_URL,
+      fileSize:
+        "2578797592 bytes",
       results,
+    },
+    {
+      headers: {
+        ...securityHeaders(),
+        "Cache-Control": "no-store",
+      },
+    },
+  );
+}
+
+async function checkLoli(env) {
+  const response =
+    await env.LOLI.fetch(
+      SOURCE_URL,
+      {
+        method: "GET",
+        headers: {
+          Range: "bytes=0-1023",
+        },
+      },
+    );
+
+  return Response.json(
+    {
+      ok: response.ok,
+      status: response.status,
+      statusText:
+        response.statusText,
+      contentType:
+        response.headers.get(
+          "content-type",
+        ),
+      contentLength:
+        response.headers.get(
+          "content-length",
+        ),
+      contentRange:
+        response.headers.get(
+          "content-range",
+        ),
+      acceptRanges:
+        response.headers.get(
+          "accept-ranges",
+        ),
     },
     {
       headers: {
@@ -490,7 +586,7 @@ function playerHtml() {
 
       debugLines.push(line);
 
-      if (debugLines.length > 80) {
+      if (debugLines.length > 100) {
         debugLines.shift();
       }
 
@@ -500,7 +596,7 @@ function playerHtml() {
       console.log(line);
     }
 
-    function errorText(error) {
+    function formatError(error) {
       if (!error) {
         return "Unknown error";
       }
@@ -527,7 +623,7 @@ function playerHtml() {
         if (event.error) {
           log(
             "WINDOW ERROR\\n" +
-            errorText(event.error),
+            formatError(event.error),
           );
           return;
         }
@@ -552,7 +648,7 @@ function playerHtml() {
       function (event) {
         log(
           "UNHANDLED REJECTION\\n" +
-          errorText(event.reason),
+          formatError(event.reason),
         );
       },
     );
@@ -659,7 +755,7 @@ function playerHtml() {
             mediaType,
           ) {
             log(
-              "getWasm type=" +
+              "getWasm: type=" +
               type +
               " codecId=" +
               codecId +
@@ -783,7 +879,7 @@ function playerHtml() {
       } catch (error) {
         log(
           "FATAL ERROR\\n\\n" +
-          errorText(error),
+          formatError(error),
         );
       }
     }
@@ -823,6 +919,13 @@ export default {
 
       if (url.pathname === "/api/check") {
         return checkLoli(env);
+      }
+
+      if (
+        url.pathname ===
+        "/api/debug-media"
+      ) {
+        return debugMedia(env);
       }
 
       if (url.pathname === "/media") {
