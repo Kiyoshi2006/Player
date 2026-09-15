@@ -1,305 +1,271 @@
-// src/index.js
+export default {
+  async fetch(request, env) {
+    return handleRequest(request, env);
+  },
+};
+
 const DEFAULT_SOURCE =
   "https://loli.nvnyep.workers.dev/13102006/Colab_Torrent_Uploads/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01E01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D.mkv";
 
 const PLAYER_CDN =
   "https://cdn.jsdelivr.net/npm/movi-player@0.4.0/dist/element.js";
 
-const HOP_BY_HOP = new Set([
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-]);
+const DEFAULT_ALLOWED_HOSTS = ["loli.nvnyep.workers.dev"];
 
-const RESPONSE_HEADERS = [
-  "accept-ranges",
-  "cache-control",
-  "content-disposition",
-  "content-encoding",
-  "content-length",
-  "content-range",
-  "content-type",
-  "etag",
-  "expires",
-  "last-modified",
-  "vary",
-];
+async function handleRequest(request, env) {
+  const url = new URL(request.url);
 
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
+  if (request.method === "OPTIONS") {
+    return corsResponse(null, 204);
+  }
 
-    if (url.pathname === "/proxy") {
-      return handleProxy(request, env);
-    }
+  if (url.pathname === "/proxy") {
+    return proxyMedia(request, env);
+  }
 
-    if (url.pathname === "/api/check") {
-      return handleCheck(request, env);
-    }
+  if (url.pathname === "/api/check") {
+    return checkSource(request, env);
+  }
 
-    if (url.pathname === "/api/health") {
-      return json({ ok: true, service: "mkv-cloudflare-player-v2" });
-    }
+  if (url.pathname === "/api/health") {
+    return jsonResponse({
+      ok: true,
+      service: "mkv-player",
+      player: "movi-player@0.4.0",
+    });
+  }
 
-    return new Response(renderPage(DEFAULT_SOURCE), {
+  if (url.pathname === "/" || url.pathname === "/index.html") {
+    return new Response(renderPage(), {
       headers: {
         "content-type": "text/html; charset=UTF-8",
         "cache-control": "no-store",
       },
     });
-  },
-};
-
-async function handleProxy(request, env) {
-  if (request.method === "OPTIONS") {
-    return cors(new Response(null, { status: 204 }));
   }
 
-  if (request.method !== "GET" && request.method !== "HEAD") {
-    return cors(new Response("Method Not Allowed", {
-      status: 405,
-      headers: { Allow: "GET, HEAD, OPTIONS" },
-    }));
-  }
-
-  const source = getSource(new URL(request.url));
-
-  if (!source) {
-    return cors(new Response("Missing or invalid source URL", { status: 400 }));
-  }
-
-  if (!isAllowedHost(source, env)) {
-    return cors(new Response(
-      `Host not allowed: ${source.hostname}. Set ALLOWED_HOSTS in Worker Variables.`,
-      { status: 403 },
-    ));
-  }
-
-  let upstream;
-  try {
-    upstream = await fetch(buildUpstreamRequest(request, source), {
-      redirect: "follow",
-    });
-  } catch (error) {
-    return cors(new Response(`Upstream fetch failed: ${error.message}`, {
-      status: 502,
-    }));
-  }
-
-  const headers = copyResponseHeaders(upstream.headers);
-  addCors(headers);
-
-  return new Response(
-    request.method === "HEAD" ? null : upstream.body,
-    {
-      status: upstream.status,
-      statusText: upstream.statusText,
-      headers,
-    },
-  );
+  return new Response("Not Found", { status: 404 });
 }
 
-async function handleCheck(request, env) {
-  if (request.method !== "GET") {
-    return json({ ok: false, error: "Method Not Allowed" }, 405);
-  }
-
-  const source = getSource(new URL(request.url));
+async function proxyMedia(request, env) {
+  const url = new URL(request.url);
+  const source = url.searchParams.get("url");
 
   if (!source) {
-    return json({ ok: false, error: "Missing or invalid source URL" }, 400);
+    return corsResponse("Missing ?url=", 400);
   }
 
-  if (!isAllowedHost(source, env)) {
-    return json({
-      ok: false,
-      error: `Host not allowed: ${source.hostname}`,
-    }, 403);
+  let sourceUrl;
+  try {
+    sourceUrl = validateSource(source, env);
+  } catch (error) {
+    return corsResponse(error.message, 403);
   }
 
-  const result = await inspectUpstream(source);
+  if (request.method === "HEAD") {
+    const result = await fetchSource(sourceUrl, request, { forceRange: true });
+    return corsResponse(null, result.response.status, result.response.headers);
+  }
 
-  return json({
-    ok: result.ok,
-    source: source.toString(),
-    ...result,
+  if (request.method !== "GET") {
+    return corsResponse("Method Not Allowed", 405, {
+      Allow: "GET, HEAD, OPTIONS",
+    });
+  }
+
+  let result = await fetchSource(sourceUrl, request);
+
+  if (
+    result.response.status === 404 ||
+    result.response.status === 416 ||
+    result.response.status === 400
+  ) {
+    if (request.headers.has("Range")) {
+      result = await fetchSource(sourceUrl, request, { stripRange: true });
+    }
+  }
+
+  return corsMediaResponse(result.response);
+}
+
+async function checkSource(request, env) {
+  const url = new URL(request.url);
+  const source = url.searchParams.get("url");
+
+  if (!source) {
+    return jsonResponse({ ok: false, error: "Missing ?url=" }, 400);
+  }
+
+  let sourceUrl;
+  try {
+    sourceUrl = validateSource(source, env);
+  } catch (error) {
+    return jsonResponse({ ok: false, error: error.message }, 403);
+  }
+
+  const normal = await probeSource(sourceUrl);
+  const range = await probeSource(sourceUrl, "bytes=0-0");
+
+  return jsonResponse({
+    ok: normal.ok || range.ok,
+    source: sourceUrl.toString(),
+    normal: normal.data,
+    range: range.data,
+    recommendation: buildRecommendation(normal, range),
   });
 }
 
-async function inspectUpstream(source) {
-  let head = null;
+async function probeSource(sourceUrl, range) {
+  const headers = new Headers({
+    Accept: "*/*",
+    "Accept-Encoding": "identity",
+  });
 
-  try {
-    head = await fetch(new Request(source, {
-      method: "HEAD",
-      headers: {
-        Accept: "*/*",
-        "Accept-Encoding": "identity",
-      },
-      redirect: "follow",
-    }), {
-      redirect: "follow",
-    });
-  } catch {
-    head = null;
-  }
-
-  if (head && head.ok) {
-    return {
-      method: "HEAD",
-      status: head.status,
-      contentType: head.headers.get("content-type"),
-      contentLength: head.headers.get("content-length"),
-      acceptRanges: head.headers.get("accept-ranges"),
-      contentRange: head.headers.get("content-range"),
-      finalUrl: head.url,
-    };
+  if (range) {
+    headers.set("Range", range);
   }
 
   try {
-    const ranged = await fetch(new Request(source, {
+    const response = await fetch(sourceUrl.toString(), {
       method: "GET",
-      headers: {
-        Range: "bytes=0-0",
-        Accept: "*/*",
-        "Accept-Encoding": "identity",
-      },
-      redirect: "follow",
-    }), {
+      headers,
       redirect: "follow",
     });
 
-    return {
-      method: "GET Range",
-      status: ranged.status,
-      contentType: ranged.headers.get("content-type"),
-      contentLength: ranged.headers.get("content-length"),
-      acceptRanges: ranged.headers.get("accept-ranges"),
-      contentRange: ranged.headers.get("content-range"),
-      finalUrl: ranged.url,
+    const data = {
+      status: response.status,
+      statusText: response.statusText,
+      contentType: response.headers.get("content-type"),
+      contentLength: response.headers.get("content-length"),
+      contentRange: response.headers.get("content-range"),
+      acceptRanges: response.headers.get("accept-ranges"),
+      finalUrl: response.url,
     };
+
+    const ok = response.ok;
+
+    if (response.body) {
+      await response.body.cancel();
+    }
+
+    return { ok, data };
   } catch (error) {
     return {
-      method: "GET Range",
-      status: 0,
-      error: error.message,
+      ok: false,
+      data: {
+        status: 0,
+        error: error instanceof Error ? error.message : String(error),
+      },
     };
   }
 }
 
-function buildUpstreamRequest(request, source) {
+async function fetchSource(sourceUrl, request, options = {}) {
   const headers = new Headers();
+  const copyHeaders = [
+    "Accept",
+    "Accept-Encoding",
+    "Cache-Control",
+    "If-Modified-Since",
+    "If-None-Match",
+    "Range",
+  ];
 
-  for (const [name, value] of request.headers) {
-    if (!HOP_BY_HOP.has(name.toLowerCase())) {
+  for (const name of copyHeaders) {
+    const value = request.headers.get(name);
+    if (value) {
       headers.set(name, value);
     }
   }
 
-  headers.set("Accept", "*/*");
+  headers.set("Accept", headers.get("Accept") || "*/*");
   headers.set("Accept-Encoding", "identity");
 
-  return new Request(source, {
-    method: request.method,
+  if (options.forceRange) {
+    headers.set("Range", "bytes=0-0");
+  }
+
+  if (options.stripRange) {
+    headers.delete("Range");
+  }
+
+  const response = await fetch(sourceUrl.toString(), {
+    method: "GET",
     headers,
     redirect: "follow",
   });
+
+  return { response };
 }
 
-function getSource(requestUrl) {
-  const encoded = requestUrl.searchParams.get("src");
-
-  if (encoded) {
-    try {
-      return new URL(decodeBase64Url(encoded));
-    } catch {
-      return null;
-    }
-  }
-
-  const raw = requestUrl.searchParams.get("url");
-
-  if (!raw) {
-    return null;
-  }
+function validateSource(source, env) {
+  let parsed;
 
   try {
-    return new URL(raw);
+    parsed = new URL(source);
   } catch {
-    return null;
+    throw new Error("URL MKV không hợp lệ.");
   }
+
+  if (parsed.protocol !== "https:") {
+    throw new Error("Chỉ cho phép HTTPS.");
+  }
+
+  const allowedHosts = getAllowedHosts(env);
+
+  if (!allowedHosts.includes("*") && !allowedHosts.includes(parsed.hostname)) {
+    throw new Error(
+      `Host chưa được cho phép: ${parsed.hostname}. Hãy thêm host vào ALLOWED_HOSTS.`,
+    );
+  }
+
+  return parsed;
 }
 
-function decodeBase64Url(value) {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
-  const binary = atob(padded);
-  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
-}
+function getAllowedHosts(env) {
+  const configured = env?.ALLOWED_HOSTS;
 
-function isAllowedHost(source, env) {
-  const configured = String(env.ALLOWED_HOSTS || "")
+  if (!configured) {
+    return DEFAULT_ALLOWED_HOSTS;
+  }
+
+  return configured
     .split(",")
-    .map((value) => value.trim().toLowerCase())
+    .map((host) => host.trim().toLowerCase())
     .filter(Boolean);
-
-  const hosts = configured.length
-    ? configured
-    : ["loli.nvnyep.workers.dev"];
-
-  const hostname = source.hostname.toLowerCase();
-
-  return hosts.some(
-    (host) => hostname === host || hostname.endsWith(`.${host}`),
-  );
 }
 
-function copyResponseHeaders(upstream) {
-  const headers = new Headers();
-
-  for (const name of RESPONSE_HEADERS) {
-    const value = upstream.get(name);
-
-    if (value !== null) {
-      headers.set(name, value);
-    }
+function buildRecommendation(normal, range) {
+  if (normal.ok && range.ok) {
+    return "Origin hoạt động và hỗ trợ Range. Có thể phát MKV trực tiếp qua proxy.";
   }
 
-  return headers;
+  if (normal.ok && !range.ok) {
+    return "Origin trả file bình thường nhưng Range lỗi. Player sẽ thử chế độ linear; tua có thể hạn chế.";
+  }
+
+  if (!normal.ok && range.ok) {
+    return "Origin chỉ hoạt động với Range. Proxy sẽ chuyển tiếp Range cho player.";
+  }
+
+  return "Origin không trả MKV thành công ở cả GET thường và Range. Kiểm tra lại URL hoặc Worker nguồn.";
 }
 
-function addCors(headers) {
+function corsMediaResponse(response) {
+  const headers = new Headers(response.headers);
+
   headers.set("Access-Control-Allow-Origin", "*");
-  headers.set(
-    "Access-Control-Allow-Methods",
-    "GET, HEAD, OPTIONS",
-  );
+  headers.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
   headers.set(
     "Access-Control-Allow-Headers",
-    "Range, Content-Type, Accept",
+    "Range, Content-Type, Accept, Origin",
   );
   headers.set(
     "Access-Control-Expose-Headers",
-    [
-      "Accept-Ranges",
-      "Content-Length",
-      "Content-Range",
-      "Content-Type",
-      "ETag",
-      "Last-Modified",
-    ].join(", "),
+    "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag",
   );
-}
+  headers.set("Cache-Control", "no-store");
 
-function cors(response) {
-  const headers = new Headers(response.headers);
-  addCors(headers);
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -307,8 +273,23 @@ function cors(response) {
   });
 }
 
-function json(value, status = 200) {
-  return new Response(JSON.stringify(value, null, 2), {
+function corsResponse(body, status = 200, extraHeaders = {}) {
+  const headers = new Headers({
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+    "Access-Control-Allow-Headers":
+      "Range, Content-Type, Accept, Origin",
+    "Access-Control-Expose-Headers":
+      "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag",
+    "Cache-Control": "no-store",
+    ...extraHeaders,
+  });
+
+  return new Response(body, { status, headers });
+}
+
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
       "content-type": "application/json; charset=UTF-8",
@@ -318,241 +299,392 @@ function json(value, status = 200) {
   });
 }
 
-function renderPage(defaultSource) {
-  const sourceJson = JSON.stringify(defaultSource);
-  const playerCdnJson = JSON.stringify(PLAYER_CDN);
+function renderPage() {
+  const source = escapeHtml(DEFAULT_SOURCE);
 
   return `<!doctype html>
 <html lang="vi">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0b0d12">
-<title>MKV Player</title>
-<style>
-:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif}
-*{box-sizing:border-box}
-body{margin:0;background:#090b10;color:#f4f6fb}
-main{width:min(1100px,100%);margin:auto;padding:20px 14px 60px}
-h1{font-size:30px;margin:4px 0 6px}
-p{color:#9da6b8;margin:0 0 18px}
-.card{background:#12151d;border:1px solid #252b38;border-radius:20px;padding:16px;margin-bottom:14px}
-label{display:block;font-weight:700;margin-bottom:8px}
-textarea,input{width:100%;border:1px solid #303747;background:#0c0f15;color:#fff;border-radius:14px;padding:14px;font-size:15px;outline:none}
-textarea{min-height:92px;resize:vertical}
-.row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
-button{border:0;border-radius:14px;padding:14px 16px;background:#2563eb;color:white;font-size:16px;font-weight:750}
-button.secondary{background:#1b202b;border:1px solid #303747}
-button.danger{background:#32181c;color:#ffadb4}
-button:disabled{opacity:.5}
-#status{margin-top:12px;line-height:1.45;color:#b7c0d0}
-#status.ok{color:#8de0a7}
-#status.error{color:#ff9da5}
-.player{overflow:hidden;border-radius:18px;background:#000;min-height:220px}
-movi-player{display:block;width:100%;height:min(70vh,650px);background:#000}
-details{margin-top:12px}
-summary{cursor:pointer;font-weight:700}
-pre{white-space:pre-wrap;overflow:auto;color:#b9c2d3;font-size:12px}
-.small{font-size:13px;color:#8f98aa}
-@media(max-width:600px){main{padding:12px 10px 40px}.row{grid-template-columns:1fr}h1{font-size:26px}.card{border-radius:16px;padding:13px}}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#09090b">
+  <title>MKV Player</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #09090b;
+      color: #f4f4f5;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #09090b;
+    }
+
+    main {
+      width: min(1100px, 100%);
+      margin: 0 auto;
+      padding: 14px;
+    }
+
+    h1 {
+      margin: 4px 0 12px;
+      font-size: 20px;
+    }
+
+    .panel {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 92px;
+      resize: vertical;
+      border: 1px solid #27272a;
+      border-radius: 12px;
+      background: #18181b;
+      color: #f4f4f5;
+      padding: 12px;
+      font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      outline: none;
+    }
+
+    textarea:focus {
+      border-color: #71717a;
+    }
+
+    .buttons {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+
+    button {
+      min-height: 44px;
+      border: 0;
+      border-radius: 10px;
+      background: #27272a;
+      color: #fff;
+      font-weight: 600;
+      padding: 10px;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+
+    button:active {
+      transform: scale(.98);
+    }
+
+    button.primary {
+      background: #2563eb;
+    }
+
+    button:disabled {
+      opacity: .5;
+      cursor: wait;
+    }
+
+    #status {
+      min-height: 24px;
+      color: #a1a1aa;
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    #diagnostics {
+      display: none;
+      margin-top: 8px;
+      padding: 10px;
+      border-radius: 10px;
+      background: #111113;
+      border: 1px solid #27272a;
+      white-space: pre-wrap;
+      overflow: auto;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    #playerWrap {
+      width: 100%;
+      min-height: 240px;
+      aspect-ratio: 16 / 9;
+      background: #000;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    movi-player {
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: #000;
+    }
+
+    .hint {
+      color: #71717a;
+      font-size: 12px;
+      margin-top: 8px;
+    }
+
+    @media (max-width: 640px) {
+      main {
+        padding: 10px;
+      }
+
+      .buttons {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      #playerWrap {
+        aspect-ratio: 16 / 9;
+      }
+    }
+  </style>
 </head>
 <body>
-<main>
-  <section class="card">
-    <h1>MKV Player</h1>
-    <p>MKV / HEVC / OPUS · tự động lấy toàn bộ audio & soft-sub trong container.</p>
-    <label for="source">URL MKV</label>
-    <textarea id="source" autocomplete="off" spellcheck="false"></textarea>
-    <div class="row">
-      <button id="play">Phát</button>
-      <button id="check" class="secondary">Kiểm tra nguồn</button>
+  <main>
+    <h1>MKV Player — iPhone</h1>
+
+    <section class="panel">
+      <textarea id="source" spellcheck="false">${source}</textarea>
+
+      <div class="buttons">
+        <button id="play" class="primary" type="button">Phát</button>
+        <button id="check" type="button">Kiểm tra nguồn</button>
+        <button id="copy" type="button">Copy link player</button>
+        <button id="clear" type="button">Xóa</button>
+      </div>
+
+      <div id="status">Đang khởi tạo player…</div>
+      <pre id="diagnostics"></pre>
+    </section>
+
+    <div id="playerWrap">
+      <movi-player id="player" controls playsinline></movi-player>
     </div>
-    <div class="row">
-      <button id="copy" class="secondary">Copy link player</button>
-      <button id="clear" class="danger">Xóa</button>
+
+    <div class="hint">
+      Subtitle/audio không hard-code. Movi Player đọc các track nhúng trong MKV.
     </div>
-    <div id="status">Sẵn sàng.</div>
-    <details>
-      <summary>Chẩn đoán</summary>
-      <pre id="diagnostic">Chưa kiểm tra.</pre>
-    </details>
-  </section>
+  </main>
 
-  <section class="card player">
-    <movi-player id="player"
-      controls
-      playsinline
-      persist="volume speed audiolang subtitlelang"
-      persistkey="mkv-cloudflare-player-v2"
-      resume
-      fastseek="buttons gestures"
-      nohotkeys>
-    </movi-player>
-  </section>
+  <script>
+    (() => {
+      "use strict";
 
-  <section class="card">
-    <strong>Audio / Subtitle</strong>
-    <p class="small">
-      Danh sách track được đọc trực tiếp từ MKV. Không hard-code ngôn ngữ;
-      file có bao nhiêu track thì player hiển thị bấy nhiêu.
-      Mở menu ⚙/CC của player để chọn.
-    </p>
-  </section>
-</main>
+      const MOVI_CDN = ${JSON.stringify(PLAYER_CDN)};
+      const sourceInput = document.getElementById("source");
+      const player = document.getElementById("player");
+      const playButton = document.getElementById("play");
+      const checkButton = document.getElementById("check");
+      const copyButton = document.getElementById("copy");
+      const clearButton = document.getElementById("clear");
+      const status = document.getElementById("status");
+      const diagnostics = document.getElementById("diagnostics");
 
-<script>
-const DEFAULT_SOURCE = ${sourceJson};
-const PLAYER_CDN = ${playerCdnJson};
+      let moviReady = false;
+      let loading = false;
 
-const sourceEl = document.getElementById("source");
-const statusEl = document.getElementById("status");
-const diagnosticEl = document.getElementById("diagnostic");
-const player = document.getElementById("player");
+      function setStatus(message) {
+        status.textContent = message;
+      }
 
-sourceEl.value = DEFAULT_SOURCE;
+      function setBusy(button, busy) {
+        button.disabled = busy;
+      }
 
-function setStatus(message, type = "") {
-  statusEl.textContent = message;
-  statusEl.className = type;
-}
+      function getSource() {
+        return sourceInput.value.trim();
+      }
 
-function encodeSource(value) {
-  const bytes = new TextEncoder().encode(value);
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
+      function getPlayerUrl() {
+        const source = getSource();
 
-function proxyUrl(source) {
-  return new URL("/proxy?src=" + encodeURIComponent(encodeSource(source)), location.origin).toString();
-}
+        if (!source) {
+          throw new Error("Chưa nhập URL MKV.");
+        }
 
-function shareUrl(source) {
-  const url = new URL(location.href);
-  url.search = "";
-  url.searchParams.set("url", source);
-  return url.toString();
-}
+        return location.origin + "/proxy?url=" + encodeURIComponent(source);
+      }
 
-function loadSource() {
-  const source = sourceEl.value.trim();
+      function showDiagnostics(data) {
+        diagnostics.style.display = "block";
+        diagnostics.textContent = JSON.stringify(data, null, 2);
+      }
 
-  if (!source) {
-    setStatus("Hãy nhập URL MKV.", "error");
-    return;
-  }
+      async function loadMovi() {
+        if (moviReady) {
+          return;
+        }
 
-  try {
-    new URL(source);
-  } catch {
-    setStatus("URL không hợp lệ.", "error");
-    return;
-  }
+        setStatus("Đang tải Movi Player…");
 
-  const target = proxyUrl(source);
-  player.src = target;
-  history.replaceState(null, "", shareUrl(source));
-  setStatus("Đang mở MKV…");
-}
+        try {
+          await import(MOVI_CDN);
+          await customElements.whenDefined("movi-player");
+          moviReady = true;
+          setStatus("Player sẵn sàng.");
+        } catch (error) {
+          setStatus(
+            "Không tải được Movi Player: " +
+            (error instanceof Error ? error.message : String(error)),
+          );
+          throw error;
+        }
+      }
 
-async function checkSource() {
-  const source = sourceEl.value.trim();
+      async function play() {
+        if (loading) {
+          return;
+        }
 
-  if (!source) {
-    setStatus("Hãy nhập URL MKV.", "error");
-    return;
-  }
+        loading = true;
+        setBusy(playButton, true);
+        diagnostics.style.display = "none";
 
-  setStatus("Đang kiểm tra nguồn…");
+        try {
+          await loadMovi();
 
-  try {
-    new URL(source);
+          const proxyUrl = getPlayerUrl();
 
-    const endpoint = new URL("/api/check", location.origin);
-    endpoint.searchParams.set("src", encodeSource(source));
+          player.src = proxyUrl;
+          setStatus("Đã gửi MKV vào player. Đang đọc container và track…");
 
-    const response = await fetch(endpoint);
-    const data = await response.json();
+          if (typeof player.play === "function") {
+            try {
+              await player.play();
+            } catch {
+              setStatus("MKV đã được nạp. Bấm Play trong player để bắt đầu.");
+            }
+          }
+        } catch (error) {
+          setStatus(
+            "Lỗi: " +
+            (error instanceof Error ? error.message : String(error)),
+          );
+        } finally {
+          loading = false;
+          setBusy(playButton, false);
+        }
+      }
 
-    diagnosticEl.textContent = JSON.stringify(data, null, 2);
+      async function check() {
+        const source = getSource();
 
-    if (data.status >= 200 && data.status < 300) {
-      setStatus(
-        "Nguồn OK: " + (data.contentType || "không có Content-Type"),
-        "ok",
-      );
-    } else {
-      setStatus(
-        "Origin trả HTTP " + data.status + ". Xem Chẩn đoán bên dưới.",
-        "error",
-      );
-    }
-  } catch (error) {
-    diagnosticEl.textContent = String(error);
-    setStatus("Không kiểm tra được nguồn.", "error");
-  }
-}
+        if (!source) {
+          setStatus("Chưa nhập URL MKV.");
+          return;
+        }
 
-async function copyPlayerLink() {
-  const source = sourceEl.value.trim();
+        setBusy(checkButton, true);
+        diagnostics.style.display = "none";
+        setStatus("Đang kiểm tra GET thường + Range…");
 
-  if (!source) {
-    setStatus("Hãy nhập URL MKV.", "error");
-    return;
-  }
+        try {
+          const response = await fetch(
+            "/api/check?url=" + encodeURIComponent(source),
+            {
+              cache: "no-store",
+            },
+          );
 
-  const url = shareUrl(source);
+          const data = await response.json();
+          showDiagnostics(data);
 
-  try {
-    await navigator.clipboard.writeText(url);
-    setStatus("Đã copy link player.", "ok");
-  } catch {
-    setStatus(url);
-  }
-}
+          if (data.ok) {
+            setStatus("Nguồn OK. Xem kết quả chi tiết bên dưới.");
+          } else {
+            setStatus("Nguồn chưa OK. Xem lỗi bên dưới.");
+          }
+        } catch (error) {
+          setStatus(
+            "Không gọi được API kiểm tra: " +
+            (error instanceof Error ? error.message : String(error)),
+          );
+        } finally {
+          setBusy(checkButton, false);
+        }
+      }
 
-document.getElementById("play").addEventListener("click", loadSource);
-document.getElementById("check").addEventListener("click", checkSource);
-document.getElementById("copy").addEventListener("click", copyPlayerLink);
-document.getElementById("clear").addEventListener("click", () => {
-  sourceEl.value = "";
-  player.removeAttribute("src");
-  history.replaceState(null, "", location.pathname);
-  diagnosticEl.textContent = "Chưa kiểm tra.";
-  setStatus("Đã xóa.");
-});
+      async function copyPlayerLink() {
+        try {
+          const link = getPlayerUrl();
 
-player.addEventListener("loadedmetadata", () => {
-  setStatus("Đã đọc metadata MKV. Audio/subtitle nằm trong menu player.", "ok");
-});
+          if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(link);
+          } else {
+            const area = document.createElement("textarea");
+            area.value = link;
+            area.style.position = "fixed";
+            area.style.opacity = "0";
+            document.body.appendChild(area);
+            area.focus();
+            area.select();
+            document.execCommand("copy");
+            area.remove();
+          }
 
-player.addEventListener("linearmode", () => {
-  setStatus("Nguồn không hỗ trợ Range; player chuyển sang linear mode.", "ok");
-});
+          setStatus("Đã copy link player.");
+        } catch (error) {
+          setStatus(
+            "Không copy được: " +
+            (error instanceof Error ? error.message : String(error)),
+          );
+        }
+      }
 
-player.addEventListener("errordisplay", (event) => {
-  const message = event?.detail?.message || "Player không thể mở nguồn.";
-  setStatus(message, "error");
-});
+      function clear() {
+        sourceInput.value = "";
+        player.src = null;
+        diagnostics.style.display = "none";
+        setStatus("Đã xóa.");
+      }
 
-const querySource = new URL(location.href).searchParams.get("url");
-if (querySource) sourceEl.value = querySource;
+      playButton.addEventListener("click", play);
+      checkButton.addEventListener("click", check);
+      copyButton.addEventListener("click", copyPlayerLink);
+      clearButton.addEventListener("click", clear);
 
-const script = document.createElement("script");
-script.type = "module";
-script.src = PLAYER_CDN;
-script.onload = () => {
-  if (querySource) loadSource();
-};
-script.onerror = () => {
-  setStatus("Không tải được Movi Player CDN.", "error");
-};
-document.head.appendChild(script);
-</script>
+      const params = new URLSearchParams(location.search);
+      const querySource = params.get("url");
+
+      if (querySource) {
+        sourceInput.value = querySource;
+      }
+
+      player.addEventListener("loadstart", () => {
+        setStatus("Player bắt đầu đọc MKV…");
+      });
+
+      player.addEventListener("loadedmetadata", () => {
+        setStatus("Đã đọc metadata. Các audio/subtitle track được lấy trực tiếp từ MKV.");
+      });
+
+      player.addEventListener("error", (event) => {
+        const detail = event && event.detail ? event.detail : "";
+        setStatus("Player báo lỗi." + (detail ? " " + String(detail) : ""));
+      });
+
+      loadMovi().catch(() => {});
+    })();
+  </script>
 </body>
 </html>`;
+}
+
+function escapeHtml(value) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
