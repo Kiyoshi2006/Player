@@ -1,6 +1,6 @@
 /**
  * Cloudflare Worker
- * libmedia ESM MKV player + Loli Service Binding.
+ * libmedia UMD MKV player + Loli Service Binding.
  */
 
 const LIBMEDIA_VERSION = "1.3.1";
@@ -10,9 +10,6 @@ const SOURCE_URL =
 
 const LIBMEDIA_PLAYER_CDN =
   `https://cdn.jsdelivr.net/npm/@libmedia/avplayer@${LIBMEDIA_VERSION}`;
-
-const LIBMEDIA_AVUTIL_CDN =
-  `https://cdn.jsdelivr.net/npm/@libmedia/avutil@${LIBMEDIA_VERSION}`;
 
 const LIBMEDIA_ROOT_CDN =
   `https://cdn.jsdelivr.net/gh/zhaohappy/libmedia@v${LIBMEDIA_VERSION}`;
@@ -60,8 +57,18 @@ async function proxyJavascript(request, path) {
     return invalidPath("Invalid libmedia path");
   }
 
+  const isMainFile =
+    cleanPath === "avplayer.js";
+
+  const isDynamicChunk =
+    /^[0-9]+\.avplayer\.js$/.test(cleanPath);
+
+  if (!isMainFile && !isDynamicChunk) {
+    return invalidPath("Invalid libmedia JavaScript path");
+  }
+
   const response = await fetch(
-    `${LIBMEDIA_PLAYER_CDN}/dist/esm/${cleanPath}`,
+    `${LIBMEDIA_PLAYER_CDN}/dist/umd/${cleanPath}`,
     {
       method: request.method,
       headers: request.headers,
@@ -71,52 +78,6 @@ async function proxyJavascript(request, path) {
   if (!response.ok) {
     return errorResponse(
       `libmedia AVPlayer error: ${response.status} ${response.statusText}`,
-      response.status,
-    );
-  }
-
-  const headers = new Headers(response.headers);
-
-  headers.set(
-    "Content-Type",
-    "application/javascript; charset=utf-8",
-  );
-
-  headers.set(
-    "Cache-Control",
-    "public, max-age=31536000, immutable",
-  );
-
-  headers.set(
-    "Cross-Origin-Resource-Policy",
-    "same-origin",
-  );
-
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
-}
-
-async function proxyAvutil(request, path) {
-  const cleanPath = path.replace(/^\/+/, "");
-
-  if (!cleanPath || cleanPath.includes("..")) {
-    return invalidPath("Invalid avutil path");
-  }
-
-  const response = await fetch(
-    `${LIBMEDIA_AVUTIL_CDN}/dist/esm/${cleanPath}`,
-    {
-      method: request.method,
-      headers: request.headers,
-    },
-  );
-
-  if (!response.ok) {
-    return errorResponse(
-      `libmedia AVUtil error: ${response.status} ${response.statusText}`,
       response.status,
     );
   }
@@ -356,9 +317,11 @@ function playerHtml() {
 
 <body>
   <div id="player"></div>
-  <div id="status">Loading...</div>
+  <div id="status">Loading libmedia...</div>
 
-  <script type="module">
+  <script src="/libmedia/avplayer.js"></script>
+
+  <script>
     const statusElement =
       document.getElementById("status");
 
@@ -394,79 +357,65 @@ function playerHtml() {
 
     async function createPlayer() {
       setStatus(
-        "Loading libmedia ESM...\\n" +
+        "Checking libmedia...\\n" +
         "crossOriginIsolated: " +
-        crossOriginIsolated + "\\n" +
+        window.crossOriginIsolated + "\\n" +
         "SharedArrayBuffer: " +
         ("SharedArrayBuffer" in window) + "\\n" +
         "VideoDecoder: " +
-        ("VideoDecoder" in window),
+        ("VideoDecoder" in window) + "\\n" +
+        "AVPlayer: " +
+        typeof window.AVPlayer,
       );
 
-      const [
-        playerModule,
-        avutilModule,
-      ] = await Promise.all([
-        import("/libmedia/avplayer.js"),
-        import("/libmedia-avutil/avutil.js"),
-      ]);
-
-      const AVPlayer =
-        playerModule.default;
-
-      const AVCodecID =
-        avutilModule.AVCodecID;
-
-      if (typeof AVPlayer !== "function") {
+      if (typeof window.AVPlayer !== "function") {
         throw new Error(
-          "libmedia AVPlayer default export is unavailable.",
-        );
-      }
-
-      if (!AVCodecID) {
-        throw new Error(
-          "libmedia AVCodecID export is unavailable.",
+          "window.AVPlayer is unavailable.",
         );
       }
 
       setStatus(
-        "libmedia loaded successfully.\\n" +
-        "Creating AVPlayer...",
+        "AVPlayer loaded successfully.\\n" +
+        "Creating player...",
       );
 
-      const player = new AVPlayer({
+      const player = new window.AVPlayer({
         container,
 
-        getWasm(type, codecId) {
+        getWasm(type, codecId, mediaType) {
           console.log(
             "getWasm:",
             type,
             codecId,
+            mediaType,
           );
 
           if (type === "decoder") {
-            switch (codecId) {
-              case AVCodecID.AV_CODEC_ID_AAC:
-                return "/libmedia-wasm/decode/aac-simd.wasm";
-
-              case AVCodecID.AV_CODEC_ID_MP3:
-                return "/libmedia-wasm/decode/mp3-simd.wasm";
-
-              case AVCodecID.AV_CODEC_ID_FLAC:
-                return "/libmedia-wasm/decode/flac-simd.wasm";
-
-              case AVCodecID.AV_CODEC_ID_H264:
-                return "/libmedia-wasm/decode/h264-simd.wasm";
-
-              case AVCodecID.AV_CODEC_ID_HEVC:
-                return "/libmedia-wasm/decode/hevc-simd.wasm";
-
-              case AVCodecID.AV_CODEC_ID_OPUS:
-                return "/libmedia-wasm/decode/opus-simd.wasm";
-
-              default:
-                return undefined;
+            if (codecId === 173) {
+              return "/libmedia-wasm/decode/hevc-simd.wasm";
             }
+
+            if (codecId === 86076) {
+              return "/libmedia-wasm/decode/opus-simd.wasm";
+            }
+
+            if (codecId === 86018) {
+              return "/libmedia-wasm/decode/aac-simd.wasm";
+            }
+
+            if (codecId === 86017) {
+              return "/libmedia-wasm/decode/mp3-simd.wasm";
+            }
+
+            if (codecId === 86028) {
+              return "/libmedia-wasm/decode/flac-simd.wasm";
+            }
+
+            if (codecId === 27) {
+              return "/libmedia-wasm/decode/h264-simd.wasm";
+            }
+
+            return undefined;
           }
 
           if (type === "resampler") {
@@ -541,19 +490,6 @@ export default {
 
       if (url.pathname === "/media") {
         return proxyMedia(request, env);
-      }
-
-      if (
-        url.pathname.startsWith(
-          "/libmedia-avutil/",
-        )
-      ) {
-        return proxyAvutil(
-          request,
-          url.pathname.substring(
-            "/libmedia-avutil/".length,
-          ),
-        );
       }
 
       if (
