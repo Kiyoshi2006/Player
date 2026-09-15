@@ -1,132 +1,59 @@
-# MKV Cloudflare Player
+# MKV Cloudflare Player v2
 
-Player web tối ưu cho iPhone/Safari để mở MKV/HEVC từ URL HTTP(S), dùng Cloudflare Worker làm Range/CORS proxy và Movi Player chạy phía trình duyệt.
+Cloudflare Worker + Movi Player for direct MKV playback in the browser.
 
-## Tính năng
+## What this version fixes
 
-- Không upload video lên Cloudflare.
-- Không transcode 4K trên Worker.
-- Proxy `GET`/`HEAD` và HTTP Range.
-- CORS cho player.
-- Tự phát hiện audio/subtitle tracks từ container MKV thông qua Movi Player.
-- Không hard-code ngôn ngữ subtitle.
-- Hỗ trợ URL trực tiếp và URL query `?url=...`.
-- Có endpoint kiểm tra Range.
-- Giao diện responsive cho iPhone.
+- No hard-coded subtitle languages.
+- No hard-coded audio languages.
+- The player reads all embedded MKV tracks.
+- Uses the same-origin `/proxy` endpoint so browser CORS does not block the source.
+- Preserves HTTP Range requests.
+- Does not download the whole MKV into Worker memory.
+- Supports sources that do not implement Range through Movi's linear mode.
+- Uses a base64url source token internally, avoiding nested-URL encoding problems.
+- Includes `/api/check` diagnostics.
+- Defaults to the user's supplied MKV source.
+- Designed for iPhone Safari.
 
-## Kiến trúc
+Movi Player 0.4.0 is loaded from jsDelivr at runtime. It performs MKV demuxing and playback in the browser instead of transcoding the video on Cloudflare.
 
-```text
-iPhone / Safari
-      |
-      v
-Cloudflare Worker
-  /proxy?url=...
-      |
-      v
-MKV origin
-      |
-      v
-Movi Player + WebAssembly + WebCodecs
-```
+## Deploy from the Cloudflare dashboard on iPhone
 
-Worker không giữ toàn bộ file trong RAM. Cloudflare Workers hỗ trợ streaming response và không áp giới hạn kích thước response body; Free plan hiện có 128 MB memory và 100.000 requests/ngày. Xem tài liệu Cloudflare để kiểm tra giới hạn hiện hành.
+The easiest route is to create a Worker and paste the contents of `src/index.js` into **Edit code**, then **Deploy**.
 
-## Quan trọng về ALLOWED_HOSTS
+No build step is required.
 
-Worker có allowlist host để tránh biến deployment thành open proxy.
+## Deploy with GitHub
 
-Mặc định cho sẵn:
+1. Create a GitHub repository.
+2. Upload this project.
+3. In Cloudflare Workers & Pages, import the repository.
+4. Build command: leave empty.
+5. Deploy command: `npx wrangler deploy`.
+6. The project uses `wrangler.jsonc`.
 
-```text
-loli.nvnyep.workers.dev
-```
+## Allowed hosts
 
-Nếu muốn dùng nguồn khác, tạo biến môi trường Worker:
+The default source host is:
 
-```text
-ALLOWED_HOSTS=example.com,another.example
-```
+`loli.nvnyep.workers.dev`
 
-Các subdomain của host đã cho phép cũng được chấp nhận.
+To use another source host, change the `ALLOWED_HOSTS` Worker variable to a comma-separated list:
 
-## Deploy
+`example.com,cdn.example.com`
 
-### Cách 1 — GitHub + Cloudflare Dashboard
+Do not expose an unrestricted public proxy unless you understand the abuse risk.
 
-1. Tạo repository GitHub.
-2. Upload toàn bộ project này.
-3. Trong Cloudflare mở Workers & Pages.
-4. Chọn Create / Import existing project từ GitHub.
-5. Chọn repository.
-6. Deploy theo cấu hình `wrangler.jsonc`.
+## Endpoints
 
-Nếu dashboard yêu cầu build command, project này không cần bước build frontend. Wrangler chỉ cần deploy static assets + Worker.
+- `/` player UI
+- `/proxy?src=<base64url>` streaming proxy
+- `/api/check?src=<base64url>` source diagnostics
+- `/api/health` health check
 
-### Cách 2 — Wrangler
+## Important iPhone note
 
-Cần Node.js.
+MKV/HEVC playback is not native HTML5 Safari playback. Movi Player uses WebCodecs and FFmpeg-WASM in the browser and provides MKV, HEVC, multi-audio and subtitle support.
 
-```bash
-npm install
-npx wrangler login
-npx wrangler deploy
-```
-
-## URL
-
-Sau deploy:
-
-```text
-https://<worker-name>.<your-subdomain>.workers.dev/
-```
-
-Có thể mở thẳng:
-
-```text
-https://<worker-name>.<your-subdomain>.workers.dev/?url=<ENCODED_MKV_URL>
-```
-
-## Kiểm tra Range
-
-Mở:
-
-```text
-/api/probe?url=<ENCODED_MKV_URL>
-```
-
-Kết quả tốt nhất là:
-
-```json
-{
-  "ok": true,
-  "status": 206,
-  "acceptRanges": "bytes"
-}
-```
-
-`206 Partial Content` là trạng thái lý tưởng cho seeking/streaming file lớn.
-
-## Giới hạn thực tế
-
-- Safari/iOS phải hỗ trợ decoder phù hợp cho codec của file.
-- MKV/HEVC không được `<video>` native xử lý như MP4; Movi Player dùng WebAssembly/WebCodecs để xử lý container/codec.
-- 2160p HEVC có thể rất nặng trên iPhone đời cũ.
-- Network chậm hoặc origin không hỗ trợ Range sẽ ảnh hưởng seeking.
-- Worker Free có giới hạn request/CPU/memory. Worker này không decode/transcode video.
-
-## Nguồn player
-
-Project sử dụng Movi Player 0.4.0, một thư viện Apache-2.0 hỗ trợ MKV, HEVC, multi-audio và subtitle tracks phía browser.
-
-Nếu bạn phân phối lại build/player, giữ thông tin license của dependency theo điều khoản của dependency.
-
-## Security
-
-Không biến `/proxy` thành open proxy nếu bạn public Worker. Hãy đặt `ALLOWED_HOSTS` thành các host video mà bạn thực sự sử dụng.
-
-Nếu cần nhiều host, phân cách bằng dấu phẩy:
-
-```text
-ALLOWED_HOSTS=loli.nvnyep.workers.dev,cdn.example.com,media.example.net
-```
+A 2160p HEVC file can be demanding on older iPhones. This project does not transcode the 4K video on Cloudflare.

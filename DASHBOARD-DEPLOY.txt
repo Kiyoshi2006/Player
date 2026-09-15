@@ -1,0 +1,4 @@
+// DASHBOARD DEPLOY
+// Cloudflare Workers > Edit code > replace the Worker source with src/index.js.
+// Then Deploy.
+// No npm install is required in the dashboard editor.
