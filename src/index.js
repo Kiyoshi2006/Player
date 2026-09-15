@@ -10,7 +10,14 @@ const DEFAULT_SOURCE =
 const PLAYER_CDN =
   "https://cdn.jsdelivr.net/npm/movi-player@0.4.0/dist/element.js";
 
-const DEFAULT_ALLOWED_HOSTS = ["loli.nvnyep.workers.dev"];
+const DEFAULT_ALLOWED_HOSTS = [
+  "loli.nvnyep.workers.dev",
+];
+
+const SAFARI_IOS_USER_AGENT =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) " +
+  "AppleWebKit/605.1.15 (KHTML, like Gecko) " +
+  "Version/18.6 Mobile/15E148 Safari/604.1";
 
 async function handleRequest(request, env) {
   const url = new URL(request.url);
@@ -32,10 +39,14 @@ async function handleRequest(request, env) {
       ok: true,
       service: "mkv-player",
       player: "movi-player@0.4.0",
+      userAgentMode: "Safari iPhone",
     });
   }
 
-  if (url.pathname === "/" || url.pathname === "/index.html") {
+  if (
+    url.pathname === "/" ||
+    url.pathname === "/index.html"
+  ) {
     return new Response(renderPage(), {
       headers: {
         "content-type": "text/html; charset=UTF-8",
@@ -44,7 +55,9 @@ async function handleRequest(request, env) {
     });
   }
 
-  return new Response("Not Found", { status: 404 });
+  return new Response("Not Found", {
+    status: 404,
+  });
 }
 
 async function proxyMedia(request, env) {
@@ -56,6 +69,7 @@ async function proxyMedia(request, env) {
   }
 
   let sourceUrl;
+
   try {
     sourceUrl = validateSource(source, env);
   } catch (error) {
@@ -63,17 +77,46 @@ async function proxyMedia(request, env) {
   }
 
   if (request.method === "HEAD") {
-    const result = await fetchSource(sourceUrl, request, { forceRange: true });
-    return corsResponse(null, result.response.status, result.response.headers);
+    const result = await fetchSource(
+      sourceUrl,
+      request,
+      {
+        forceRange: true,
+      },
+    );
+
+    return corsResponse(
+      null,
+      result.response.status,
+      result.response.headers,
+    );
   }
 
   if (request.method !== "GET") {
-    return corsResponse("Method Not Allowed", 405, {
-      Allow: "GET, HEAD, OPTIONS",
-    });
+    return corsResponse(
+      "Method Not Allowed",
+      405,
+      {
+        Allow: "GET, HEAD, OPTIONS",
+      },
+    );
   }
 
-  let result = await fetchSource(sourceUrl, request);
+  let result;
+
+  try {
+    result = await fetchSource(
+      sourceUrl,
+      request,
+    );
+  } catch (error) {
+    return corsResponse(
+      error instanceof Error
+        ? error.message
+        : String(error),
+      502,
+    );
+  }
 
   if (
     result.response.status === 404 ||
@@ -81,11 +124,28 @@ async function proxyMedia(request, env) {
     result.response.status === 400
   ) {
     if (request.headers.has("Range")) {
-      result = await fetchSource(sourceUrl, request, { stripRange: true });
+      try {
+        result = await fetchSource(
+          sourceUrl,
+          request,
+          {
+            stripRange: true,
+          },
+        );
+      } catch (error) {
+        return corsResponse(
+          error instanceof Error
+            ? error.message
+            : String(error),
+          502,
+        );
+      }
     }
   }
 
-  return corsMediaResponse(result.response);
+  return corsMediaResponse(
+    result.response,
+  );
 }
 
 async function checkSource(request, env) {
@@ -93,127 +153,271 @@ async function checkSource(request, env) {
   const source = url.searchParams.get("url");
 
   if (!source) {
-    return jsonResponse({ ok: false, error: "Missing ?url=" }, 400);
+    return jsonResponse(
+      {
+        ok: false,
+        error: "Missing ?url=",
+      },
+      400,
+    );
   }
 
   let sourceUrl;
+
   try {
-    sourceUrl = validateSource(source, env);
+    sourceUrl = validateSource(
+      source,
+      env,
+    );
   } catch (error) {
-    return jsonResponse({ ok: false, error: error.message }, 403);
+    return jsonResponse(
+      {
+        ok: false,
+        error: error.message,
+      },
+      403,
+    );
   }
 
-  const normal = await probeSource(sourceUrl);
-  const range = await probeSource(sourceUrl, "bytes=0-0");
+  const normal = await probeSource(
+    sourceUrl,
+  );
+
+  const range = await probeSource(
+    sourceUrl,
+    "bytes=0-0",
+  );
 
   return jsonResponse({
     ok: normal.ok || range.ok,
     source: sourceUrl.toString(),
+    requestMode: "Safari iPhone User-Agent",
+    userAgent: SAFARI_IOS_USER_AGENT,
     normal: normal.data,
     range: range.data,
-    recommendation: buildRecommendation(normal, range),
+    recommendation:
+      buildRecommendation(
+        normal,
+        range,
+      ),
   });
 }
 
-async function probeSource(sourceUrl, range) {
-  const headers = new Headers({
-    Accept: "*/*",
-    "Accept-Encoding": "identity",
-  });
+async function probeSource(
+  sourceUrl,
+  range,
+) {
+  const headers =
+    createBrowserHeaders();
 
   if (range) {
-    headers.set("Range", range);
+    headers.set(
+      "Range",
+      range,
+    );
   }
 
   try {
-    const response = await fetch(sourceUrl.toString(), {
-      method: "GET",
-      headers,
-      redirect: "follow",
-    });
+    const response = await fetch(
+      sourceUrl.toString(),
+      {
+        method: "GET",
+        headers,
+        redirect: "follow",
+      },
+    );
 
     const data = {
       status: response.status,
       statusText: response.statusText,
-      contentType: response.headers.get("content-type"),
-      contentLength: response.headers.get("content-length"),
-      contentRange: response.headers.get("content-range"),
-      acceptRanges: response.headers.get("accept-ranges"),
+      contentType:
+        response.headers.get(
+          "content-type",
+        ),
+      contentLength:
+        response.headers.get(
+          "content-length",
+        ),
+      contentRange:
+        response.headers.get(
+          "content-range",
+        ),
+      acceptRanges:
+        response.headers.get(
+          "accept-ranges",
+        ),
       finalUrl: response.url,
     };
 
-    const ok = response.ok;
+    const ok =
+      response.ok ||
+      response.status === 206;
 
     if (response.body) {
       await response.body.cancel();
     }
 
-    return { ok, data };
+    return {
+      ok,
+      data,
+    };
   } catch (error) {
     return {
       ok: false,
       data: {
         status: 0,
-        error: error instanceof Error ? error.message : String(error),
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
       },
     };
   }
 }
 
-async function fetchSource(sourceUrl, request, options = {}) {
-  const headers = new Headers();
-  const copyHeaders = [
-    "Accept",
-    "Accept-Encoding",
+async function fetchSource(
+  sourceUrl,
+  request,
+  options = {},
+) {
+  const headers =
+    createBrowserHeaders();
+
+  const forwardHeaders = [
     "Cache-Control",
     "If-Modified-Since",
     "If-None-Match",
-    "Range",
   ];
 
-  for (const name of copyHeaders) {
-    const value = request.headers.get(name);
+  for (const name of forwardHeaders) {
+    const value =
+      request.headers.get(name);
+
     if (value) {
-      headers.set(name, value);
+      headers.set(
+        name,
+        value,
+      );
     }
   }
 
-  headers.set("Accept", headers.get("Accept") || "*/*");
-  headers.set("Accept-Encoding", "identity");
+  const incomingRange =
+    request.headers.get("Range");
+
+  if (incomingRange) {
+    headers.set(
+      "Range",
+      incomingRange,
+    );
+  }
 
   if (options.forceRange) {
-    headers.set("Range", "bytes=0-0");
+    headers.set(
+      "Range",
+      "bytes=0-0",
+    );
   }
 
   if (options.stripRange) {
     headers.delete("Range");
   }
 
-  const response = await fetch(sourceUrl.toString(), {
-    method: "GET",
-    headers,
-    redirect: "follow",
-  });
+  const response = await fetch(
+    sourceUrl.toString(),
+    {
+      method: "GET",
+      headers,
+      redirect: "follow",
+    },
+  );
 
-  return { response };
+  return {
+    response,
+  };
 }
 
-function validateSource(source, env) {
+function createBrowserHeaders() {
+  const headers = new Headers();
+
+  headers.set(
+    "User-Agent",
+    SAFARI_IOS_USER_AGENT,
+  );
+
+  headers.set(
+    "Accept",
+    "video/mp4,video/webm,video/*;q=0.9,*/*;q=0.8",
+  );
+
+  headers.set(
+    "Accept-Language",
+    "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+  );
+
+  headers.set(
+    "Accept-Encoding",
+    "identity",
+  );
+
+  headers.set(
+    "Referer",
+    "https://loli.nvnyep.workers.dev/",
+  );
+
+  headers.set(
+    "Origin",
+    "https://loli.nvnyep.workers.dev",
+  );
+
+  headers.set(
+    "Sec-Fetch-Dest",
+    "video",
+  );
+
+  headers.set(
+    "Sec-Fetch-Mode",
+    "cors",
+  );
+
+  headers.set(
+    "Sec-Fetch-Site",
+    "same-origin",
+  );
+
+  return headers;
+}
+
+function validateSource(
+  source,
+  env,
+) {
   let parsed;
 
   try {
     parsed = new URL(source);
   } catch {
-    throw new Error("URL MKV không hợp lệ.");
+    throw new Error(
+      "URL MKV không hợp lệ.",
+    );
   }
 
-  if (parsed.protocol !== "https:") {
-    throw new Error("Chỉ cho phép HTTPS.");
+  if (
+    parsed.protocol !== "https:"
+  ) {
+    throw new Error(
+      "Chỉ cho phép HTTPS.",
+    );
   }
 
-  const allowedHosts = getAllowedHosts(env);
+  const allowedHosts =
+    getAllowedHosts(env);
 
-  if (!allowedHosts.includes("*") && !allowedHosts.includes(parsed.hostname)) {
+  if (
+    !allowedHosts.includes("*") &&
+    !allowedHosts.includes(
+      parsed.hostname,
+    )
+  ) {
     throw new Error(
       `Host chưa được cho phép: ${parsed.hostname}. Hãy thêm host vào ALLOWED_HOSTS.`,
     );
@@ -223,7 +427,8 @@ function validateSource(source, env) {
 }
 
 function getAllowedHosts(env) {
-  const configured = env?.ALLOWED_HOSTS;
+  const configured =
+    env?.ALLOWED_HOSTS;
 
   if (!configured) {
     return DEFAULT_ALLOWED_HOSTS;
@@ -231,88 +436,203 @@ function getAllowedHosts(env) {
 
   return configured
     .split(",")
-    .map((host) => host.trim().toLowerCase())
+    .map((host) =>
+      host.trim().toLowerCase(),
+    )
     .filter(Boolean);
 }
 
-function buildRecommendation(normal, range) {
-  if (normal.ok && range.ok) {
-    return "Origin hoạt động và hỗ trợ Range. Có thể phát MKV trực tiếp qua proxy.";
+function buildRecommendation(
+  normal,
+  range,
+) {
+  if (
+    normal.ok &&
+    range.ok
+  ) {
+    return (
+      "Origin hoạt động và hỗ trợ Range. " +
+      "Request đã dùng User-Agent Safari iPhone."
+    );
   }
 
-  if (normal.ok && !range.ok) {
-    return "Origin trả file bình thường nhưng Range lỗi. Player sẽ thử chế độ linear; tua có thể hạn chế.";
+  if (
+    normal.ok &&
+    !range.ok
+  ) {
+    return (
+      "Origin trả file bình thường nhưng Range lỗi. " +
+      "Player sẽ thử chế độ linear; tua có thể hạn chế."
+    );
   }
 
-  if (!normal.ok && range.ok) {
-    return "Origin chỉ hoạt động với Range. Proxy sẽ chuyển tiếp Range cho player.";
+  if (
+    !normal.ok &&
+    range.ok
+  ) {
+    return (
+      "Origin chỉ hoạt động với Range. " +
+      "Proxy sẽ chuyển tiếp Range cho player."
+    );
   }
 
-  return "Origin không trả MKV thành công ở cả GET thường và Range. Kiểm tra lại URL hoặc Worker nguồn.";
+  return (
+    "Origin không trả MKV thành công ở cả GET thường và Range. " +
+    "Nếu Safari thật tải được nhưng kết quả này vẫn 404, " +
+    "khả năng cao Worker loli đang xử lý Worker-to-Worker request khác với browser request."
+  );
 }
 
-function corsMediaResponse(response) {
-  const headers = new Headers(response.headers);
+function corsMediaResponse(
+  response,
+) {
+  const headers =
+    new Headers(
+      response.headers,
+    );
 
-  headers.set("Access-Control-Allow-Origin", "*");
-  headers.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+  headers.set(
+    "Access-Control-Allow-Origin",
+    "*",
+  );
+
+  headers.set(
+    "Access-Control-Allow-Methods",
+    "GET, HEAD, OPTIONS",
+  );
+
   headers.set(
     "Access-Control-Allow-Headers",
-    "Range, Content-Type, Accept, Origin",
+    [
+      "Range",
+      "Content-Type",
+      "Accept",
+      "Origin",
+      "User-Agent",
+    ].join(", "),
   );
+
   headers.set(
     "Access-Control-Expose-Headers",
-    "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag",
+    [
+      "Accept-Ranges",
+      "Content-Length",
+      "Content-Range",
+      "Content-Type",
+      "ETag",
+      "Last-Modified",
+    ].join(", "),
   );
-  headers.set("Cache-Control", "no-store");
 
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
-}
+  headers.set(
+    "Cache-Control",
+    "no-store",
+  );
 
-function corsResponse(body, status = 200, extraHeaders = {}) {
-  const headers = new Headers({
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-    "Access-Control-Allow-Headers":
-      "Range, Content-Type, Accept, Origin",
-    "Access-Control-Expose-Headers":
-      "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag",
-    "Cache-Control": "no-store",
-    ...extraHeaders,
-  });
-
-  return new Response(body, { status, headers });
-}
-
-function jsonResponse(data, status = 200) {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=UTF-8",
-      "cache-control": "no-store",
-      "access-control-allow-origin": "*",
+  return new Response(
+    response.body,
+    {
+      status: response.status,
+      statusText:
+        response.statusText,
+      headers,
     },
-  });
+  );
+}
+
+function corsResponse(
+  body,
+  status = 200,
+  extraHeaders = {},
+) {
+  const headers =
+    new Headers({
+      "Access-Control-Allow-Origin":
+        "*",
+      "Access-Control-Allow-Methods":
+        "GET, HEAD, OPTIONS",
+      "Access-Control-Allow-Headers":
+        [
+          "Range",
+          "Content-Type",
+          "Accept",
+          "Origin",
+          "User-Agent",
+        ].join(", "),
+      "Access-Control-Expose-Headers":
+        [
+          "Accept-Ranges",
+          "Content-Length",
+          "Content-Range",
+          "Content-Type",
+          "ETag",
+        ].join(", "),
+      "Cache-Control":
+        "no-store",
+      ...extraHeaders,
+    });
+
+  return new Response(
+    body,
+    {
+      status,
+      headers,
+    },
+  );
+}
+
+function jsonResponse(
+  data,
+  status = 200,
+) {
+  return new Response(
+    JSON.stringify(
+      data,
+      null,
+      2,
+    ),
+    {
+      status,
+      headers: {
+        "content-type":
+          "application/json; charset=UTF-8",
+        "cache-control":
+          "no-store",
+        "access-control-allow-origin":
+          "*",
+      },
+    },
+  );
 }
 
 function renderPage() {
-  const source = escapeHtml(DEFAULT_SOURCE);
+  const source =
+    escapeHtml(
+      DEFAULT_SOURCE,
+    );
 
   return `<!doctype html>
 <html lang="vi">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#09090b">
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover"
+  >
+  <meta
+    name="theme-color"
+    content="#09090b"
+  >
   <title>MKV Player</title>
+
   <style>
     :root {
       color-scheme: dark;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
       background: #09090b;
       color: #f4f4f5;
     }
@@ -353,7 +673,12 @@ function renderPage() {
       background: #18181b;
       color: #f4f4f5;
       padding: 12px;
-      font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      font:
+        14px/1.45
+        ui-monospace,
+        SFMono-Regular,
+        Menlo,
+        monospace;
       outline: none;
     }
 
@@ -363,7 +688,8 @@ function renderPage() {
 
     .buttons {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns:
+        repeat(4, 1fr);
       gap: 8px;
     }
 
@@ -409,7 +735,12 @@ function renderPage() {
       border: 1px solid #27272a;
       white-space: pre-wrap;
       overflow: auto;
-      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      font:
+        12px/1.45
+        ui-monospace,
+        SFMono-Regular,
+        Menlo,
+        monospace;
     }
 
     #playerWrap {
@@ -440,7 +771,8 @@ function renderPage() {
       }
 
       .buttons {
-        grid-template-columns: repeat(2, 1fr);
+        grid-template-columns:
+          repeat(2, 1fr);
       }
 
       #playerWrap {
@@ -449,30 +781,66 @@ function renderPage() {
     }
   </style>
 </head>
+
 <body>
   <main>
     <h1>MKV Player — iPhone</h1>
 
     <section class="panel">
-      <textarea id="source" spellcheck="false">${source}</textarea>
+      <textarea
+        id="source"
+        spellcheck="false"
+      >${source}</textarea>
 
       <div class="buttons">
-        <button id="play" class="primary" type="button">Phát</button>
-        <button id="check" type="button">Kiểm tra nguồn</button>
-        <button id="copy" type="button">Copy link player</button>
-        <button id="clear" type="button">Xóa</button>
+        <button
+          id="play"
+          class="primary"
+          type="button"
+        >
+          Phát
+        </button>
+
+        <button
+          id="check"
+          type="button"
+        >
+          Kiểm tra nguồn
+        </button>
+
+        <button
+          id="copy"
+          type="button"
+        >
+          Copy link player
+        </button>
+
+        <button
+          id="clear"
+          type="button"
+        >
+          Xóa
+        </button>
       </div>
 
-      <div id="status">Đang khởi tạo player…</div>
+      <div id="status">
+        Đang khởi tạo player…
+      </div>
+
       <pre id="diagnostics"></pre>
     </section>
 
     <div id="playerWrap">
-      <movi-player id="player" controls playsinline></movi-player>
+      <movi-player
+        id="player"
+        controls
+        playsinline
+      ></movi-player>
     </div>
 
     <div class="hint">
-      Subtitle/audio không hard-code. Movi Player đọc các track nhúng trong MKV.
+      Subtitle/audio không hard-code.
+      Movi Player đọc các track nhúng trong MKV.
     </div>
   </main>
 
@@ -480,25 +848,63 @@ function renderPage() {
     (() => {
       "use strict";
 
-      const MOVI_CDN = ${JSON.stringify(PLAYER_CDN)};
-      const sourceInput = document.getElementById("source");
-      const player = document.getElementById("player");
-      const playButton = document.getElementById("play");
-      const checkButton = document.getElementById("check");
-      const copyButton = document.getElementById("copy");
-      const clearButton = document.getElementById("clear");
-      const status = document.getElementById("status");
-      const diagnostics = document.getElementById("diagnostics");
+      const MOVI_CDN =
+        ${JSON.stringify(PLAYER_CDN)};
+
+      const sourceInput =
+        document.getElementById(
+          "source",
+        );
+
+      const player =
+        document.getElementById(
+          "player",
+        );
+
+      const playButton =
+        document.getElementById(
+          "play",
+        );
+
+      const checkButton =
+        document.getElementById(
+          "check",
+        );
+
+      const copyButton =
+        document.getElementById(
+          "copy",
+        );
+
+      const clearButton =
+        document.getElementById(
+          "clear",
+        );
+
+      const status =
+        document.getElementById(
+          "status",
+        );
+
+      const diagnostics =
+        document.getElementById(
+          "diagnostics",
+        );
 
       let moviReady = false;
       let loading = false;
 
       function setStatus(message) {
-        status.textContent = message;
+        status.textContent =
+          message;
       }
 
-      function setBusy(button, busy) {
-        button.disabled = busy;
+      function setBusy(
+        button,
+        busy,
+      ) {
+        button.disabled =
+          busy;
       }
 
       function getSource() {
@@ -506,18 +912,36 @@ function renderPage() {
       }
 
       function getPlayerUrl() {
-        const source = getSource();
+        const source =
+          getSource();
 
         if (!source) {
-          throw new Error("Chưa nhập URL MKV.");
+          throw new Error(
+            "Chưa nhập URL MKV.",
+          );
         }
 
-        return location.origin + "/proxy?url=" + encodeURIComponent(source);
+        return (
+          location.origin +
+          "/proxy?url=" +
+          encodeURIComponent(
+            source,
+          )
+        );
       }
 
-      function showDiagnostics(data) {
-        diagnostics.style.display = "block";
-        diagnostics.textContent = JSON.stringify(data, null, 2);
+      function showDiagnostics(
+        data,
+      ) {
+        diagnostics.style.display =
+          "block";
+
+        diagnostics.textContent =
+          JSON.stringify(
+            data,
+            null,
+            2,
+          );
       }
 
       async function loadMovi() {
@@ -525,20 +949,23 @@ function renderPage() {
           return;
         }
 
-        setStatus("Đang tải Movi Player…");
+        setStatus(
+          "Đang tải Movi Player…",
+        );
 
-        try {
-          await import(MOVI_CDN);
-          await customElements.whenDefined("movi-player");
-          moviReady = true;
-          setStatus("Player sẵn sàng.");
-        } catch (error) {
-          setStatus(
-            "Không tải được Movi Player: " +
-            (error instanceof Error ? error.message : String(error)),
-          );
-          throw error;
-        }
+        await import(
+          MOVI_CDN
+        );
+
+        await customElements.whenDefined(
+          "movi-player",
+        );
+
+        moviReady = true;
+
+        setStatus(
+          "Player sẵn sàng.",
+        );
       }
 
       async function play() {
@@ -547,133 +974,280 @@ function renderPage() {
         }
 
         loading = true;
-        setBusy(playButton, true);
-        diagnostics.style.display = "none";
+        setBusy(
+          playButton,
+          true,
+        );
+
+        diagnostics.style.display =
+          "none";
 
         try {
           await loadMovi();
 
-          const proxyUrl = getPlayerUrl();
+          const proxyUrl =
+            getPlayerUrl();
 
-          player.src = proxyUrl;
-          setStatus("Đã gửi MKV vào player. Đang đọc container và track…");
+          player.src =
+            proxyUrl;
 
-          if (typeof player.play === "function") {
+          setStatus(
+            "Đã gửi MKV vào player. " +
+            "Đang đọc container và track…",
+          );
+
+          if (
+            typeof player.play ===
+            "function"
+          ) {
             try {
               await player.play();
             } catch {
-              setStatus("MKV đã được nạp. Bấm Play trong player để bắt đầu.");
+              setStatus(
+                "MKV đã được nạp. " +
+                "Bấm Play trong player để bắt đầu.",
+              );
             }
           }
         } catch (error) {
           setStatus(
             "Lỗi: " +
-            (error instanceof Error ? error.message : String(error)),
+            (
+              error instanceof Error
+                ? error.message
+                : String(error)
+            ),
           );
         } finally {
           loading = false;
-          setBusy(playButton, false);
+
+          setBusy(
+            playButton,
+            false,
+          );
         }
       }
 
       async function check() {
-        const source = getSource();
+        const source =
+          getSource();
 
         if (!source) {
-          setStatus("Chưa nhập URL MKV.");
+          setStatus(
+            "Chưa nhập URL MKV.",
+          );
           return;
         }
 
-        setBusy(checkButton, true);
-        diagnostics.style.display = "none";
-        setStatus("Đang kiểm tra GET thường + Range…");
+        setBusy(
+          checkButton,
+          true,
+        );
+
+        diagnostics.style.display =
+          "none";
+
+        setStatus(
+          "Đang kiểm tra bằng Safari iPhone User-Agent…",
+        );
 
         try {
-          const response = await fetch(
-            "/api/check?url=" + encodeURIComponent(source),
-            {
-              cache: "no-store",
-            },
+          const response =
+            await fetch(
+              "/api/check?url=" +
+              encodeURIComponent(
+                source,
+              ),
+              {
+                cache:
+                  "no-store",
+              },
+            );
+
+          const data =
+            await response.json();
+
+          showDiagnostics(
+            data,
           );
 
-          const data = await response.json();
-          showDiagnostics(data);
-
           if (data.ok) {
-            setStatus("Nguồn OK. Xem kết quả chi tiết bên dưới.");
+            setStatus(
+              "Nguồn OK. Xem kết quả chi tiết bên dưới.",
+            );
           } else {
-            setStatus("Nguồn chưa OK. Xem lỗi bên dưới.");
+            setStatus(
+              "Nguồn chưa OK. Xem lỗi bên dưới.",
+            );
           }
         } catch (error) {
           setStatus(
             "Không gọi được API kiểm tra: " +
-            (error instanceof Error ? error.message : String(error)),
+            (
+              error instanceof Error
+                ? error.message
+                : String(error)
+            ),
           );
         } finally {
-          setBusy(checkButton, false);
+          setBusy(
+            checkButton,
+            false,
+          );
         }
       }
 
       async function copyPlayerLink() {
         try {
-          const link = getPlayerUrl();
+          const link =
+            getPlayerUrl();
 
-          if (navigator.clipboard && window.isSecureContext) {
-            await navigator.clipboard.writeText(link);
+          if (
+            navigator.clipboard &&
+            window.isSecureContext
+          ) {
+            await navigator.clipboard.writeText(
+              link,
+            );
           } else {
-            const area = document.createElement("textarea");
-            area.value = link;
-            area.style.position = "fixed";
-            area.style.opacity = "0";
-            document.body.appendChild(area);
+            const area =
+              document.createElement(
+                "textarea",
+              );
+
+            area.value =
+              link;
+
+            area.style.position =
+              "fixed";
+
+            area.style.opacity =
+              "0";
+
+            document.body.appendChild(
+              area,
+            );
+
             area.focus();
             area.select();
-            document.execCommand("copy");
+
+            document.execCommand(
+              "copy",
+            );
+
             area.remove();
           }
 
-          setStatus("Đã copy link player.");
+          setStatus(
+            "Đã copy link player.",
+          );
         } catch (error) {
           setStatus(
             "Không copy được: " +
-            (error instanceof Error ? error.message : String(error)),
+            (
+              error instanceof Error
+                ? error.message
+                : String(error)
+            ),
           );
         }
       }
 
       function clear() {
-        sourceInput.value = "";
-        player.src = null;
-        diagnostics.style.display = "none";
-        setStatus("Đã xóa.");
+        sourceInput.value =
+          "";
+
+        player.removeAttribute(
+          "src",
+        );
+
+        diagnostics.style.display =
+          "none";
+
+        diagnostics.textContent =
+          "";
+
+        setStatus(
+          "Đã xóa.",
+        );
       }
 
-      playButton.addEventListener("click", play);
-      checkButton.addEventListener("click", check);
-      copyButton.addEventListener("click", copyPlayerLink);
-      clearButton.addEventListener("click", clear);
+      playButton.addEventListener(
+        "click",
+        play,
+      );
 
-      const params = new URLSearchParams(location.search);
-      const querySource = params.get("url");
+      checkButton.addEventListener(
+        "click",
+        check,
+      );
+
+      copyButton.addEventListener(
+        "click",
+        copyPlayerLink,
+      );
+
+      clearButton.addEventListener(
+        "click",
+        clear,
+      );
+
+      const params =
+        new URLSearchParams(
+          location.search,
+        );
+
+      const querySource =
+        params.get("url");
 
       if (querySource) {
-        sourceInput.value = querySource;
+        sourceInput.value =
+          querySource;
       }
 
-      player.addEventListener("loadstart", () => {
-        setStatus("Player bắt đầu đọc MKV…");
-      });
+      player.addEventListener(
+        "loadstart",
+        () => {
+          setStatus(
+            "Player bắt đầu đọc MKV…",
+          );
+        },
+      );
 
-      player.addEventListener("loadedmetadata", () => {
-        setStatus("Đã đọc metadata. Các audio/subtitle track được lấy trực tiếp từ MKV.");
-      });
+      player.addEventListener(
+        "loadedmetadata",
+        () => {
+          setStatus(
+            "Đã đọc metadata. " +
+            "Các audio/subtitle track được lấy trực tiếp từ MKV.",
+          );
+        },
+      );
 
-      player.addEventListener("error", (event) => {
-        const detail = event && event.detail ? event.detail : "";
-        setStatus("Player báo lỗi." + (detail ? " " + String(detail) : ""));
-      });
+      player.addEventListener(
+        "error",
+        (event) => {
+          const detail =
+            event &&
+            event.detail
+              ? event.detail
+              : "";
 
-      loadMovi().catch(() => {});
+          setStatus(
+            "Player báo lỗi." +
+            (
+              detail
+                ? " " +
+                  String(detail)
+                : ""
+            ),
+          );
+        },
+      );
+
+      loadMovi().catch(
+        () => {},
+      );
     })();
   </script>
 </body>
@@ -682,9 +1256,24 @@ function renderPage() {
 
 function escapeHtml(value) {
   return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+    .replaceAll(
+      "&",
+      "&amp;",
+    )
+    .replaceAll(
+      "<",
+      "&lt;",
+    )
+    .replaceAll(
+      ">",
+      "&gt;",
+    )
+    .replaceAll(
+      '"',
+      "&quot;",
+    )
+    .replaceAll(
+      "'",
+      "&#039;",
+    );
 }
