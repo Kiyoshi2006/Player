@@ -8,8 +8,14 @@ const LIBMEDIA_VERSION = "1.3.1";
 const SOURCE_URL =
   "https://loli.nvnyep.workers.dev/13102006/Colab_Torrent_Uploads/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01E01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D.mkv";
 
-const LIBMEDIA_CDN =
-  `https://cdn.jsdelivr.net/gh/zhaohappy/libmedia@${LIBMEDIA_VERSION}`;
+const LIBMEDIA_PLAYER_CDN =
+  `https://cdn.jsdelivr.net/npm/@libmedia/avplayer@${LIBMEDIA_VERSION}`;
+
+const LIBMEDIA_AVUTIL_CDN =
+  `https://cdn.jsdelivr.net/npm/@libmedia/avutil@${LIBMEDIA_VERSION}`;
+
+const LIBMEDIA_ROOT_CDN =
+  `https://cdn.jsdelivr.net/npm/@libmedia/avplayer@${LIBMEDIA_VERSION}`;
 
 function securityHeaders() {
   return {
@@ -38,7 +44,7 @@ async function proxyJavascript(request, path) {
   }
 
   const response = await fetch(
-    `${LIBMEDIA_CDN}/dist/esm/${cleanPath}`,
+    `${LIBMEDIA_PLAYER_CDN}/dist/esm/${cleanPath}`,
     {
       method: request.method,
       headers: request.headers,
@@ -47,7 +53,7 @@ async function proxyJavascript(request, path) {
 
   if (!response.ok) {
     return new Response(
-      `libmedia ESM error: ${response.status} ${response.statusText}`,
+      `libmedia AVPlayer error: ${response.status} ${response.statusText}`,
       {
         status: response.status,
         headers: securityHeaders(),
@@ -89,7 +95,7 @@ async function proxyAvutil(request, path) {
   }
 
   const response = await fetch(
-    `${LIBMEDIA_CDN}/dist/avutil/esm/${cleanPath}`,
+    `${LIBMEDIA_AVUTIL_CDN}/dist/esm/${cleanPath}`,
     {
       method: request.method,
       headers: request.headers,
@@ -98,7 +104,7 @@ async function proxyAvutil(request, path) {
 
   if (!response.ok) {
     return new Response(
-      `avutil ESM error: ${response.status} ${response.statusText}`,
+      `libmedia AVUtil error: ${response.status} ${response.statusText}`,
       {
         status: response.status,
         headers: securityHeaders(),
