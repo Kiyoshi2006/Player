@@ -8,42 +8,37 @@ function corsHeaders() {
     "Access-Control-Allow-Headers":
       "Range, Content-Type, Accept, Origin, User-Agent",
     "Access-Control-Expose-Headers":
-      "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag, Last-Modified",
+      "Accept-Ranges, Content-Length, Content-Range, Content-Type",
   };
 }
 
 async function proxyMedia(request, env) {
   const headers = new Headers();
 
-  const range = request.headers.get("Range");
-  if (range) {
-    headers.set("Range", range);
+  for (const name of ["Range", "Accept"]) {
+    const value = request.headers.get(name);
+    if (value) {
+      headers.set(name, value);
+    }
   }
 
-  const accept = request.headers.get("Accept");
-  if (accept) {
-    headers.set("Accept", accept);
-  }
-
-  const upstreamRequest = new Request(SOURCE_URL, {
+  const upstream = new Request(SOURCE_URL, {
     method: request.method === "HEAD" ? "HEAD" : "GET",
     headers,
   });
 
-  const response = await env.LOLI.fetch(upstreamRequest);
+  const response = await env.LOLI.fetch(upstream);
 
   const responseHeaders = new Headers(corsHeaders());
 
-  const headersToCopy = [
+  for (const name of [
     "Content-Type",
     "Content-Length",
     "Content-Range",
     "Accept-Ranges",
     "ETag",
     "Last-Modified",
-  ];
-
-  for (const name of headersToCopy) {
+  ]) {
     const value = response.headers.get(name);
     if (value !== null) {
       responseHeaders.set(name, value);
@@ -58,6 +53,55 @@ async function proxyMedia(request, env) {
       headers: responseHeaders,
     }
   );
+}
+
+function playerHtml(request) {
+  const playerUrl = new URL("/media", request.url).href;
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta
+    name="viewport"
+    content="width=device-width,initial-scale=1,viewport-fit=cover"
+  >
+  <title>MKV Test Player</title>
+
+  <script type="module"
+    src="https://cdn.jsdelivr.net/npm/movi-player@0.4.0/dist/element.js">
+  </script>
+
+  <style>
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      background: #000;
+      min-height: 100%;
+    }
+
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    movi-player {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+  </style>
+</head>
+<body>
+  <movi-player
+    src="${playerUrl}"
+    controls
+    autoplay="false">
+  </movi-player>
+</body>
+</html>`;
 }
 
 export default {
@@ -78,7 +122,9 @@ export default {
         return Response.json(
           {
             ok: false,
-            error: error instanceof Error ? error.message : String(error),
+            error: error instanceof Error
+              ? error.message
+              : String(error),
           },
           {
             status: 502,
@@ -88,13 +134,11 @@ export default {
       }
     }
 
-    return new Response(
-      "Player Worker OK\n\nOpen /media to test MKV streaming.",
-      {
-        headers: {
-          "Content-Type": "text/plain; charset=utf-8",
-        },
-      }
-    );
+    return new Response(playerHtml(request), {
+      headers: {
+        "Content-Type": "text/html; charset=UTF-8",
+        "Cache-Control": "no-store",
+      },
+    });
   },
 };
