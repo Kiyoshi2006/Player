@@ -1,6 +1,6 @@
 /**
  * Cloudflare Worker
- * iPhone MKV player using libmedia 1.3.1.
+ * libmedia ESM MKV player + Loli Service Binding.
  */
 
 const LIBMEDIA_VERSION = "1.3.1";
@@ -10,21 +10,6 @@ const SOURCE_URL =
 
 const LIBMEDIA_CDN =
   `https://cdn.jsdelivr.net/gh/zhaohappy/libmedia@${LIBMEDIA_VERSION}`;
-
-/*
- * FFmpeg/libavcodec codec IDs.
- *
- * These are used instead of AVCodecID because the UMD build does not
- * expose AVCodecID as a browser global.
- */
-const CODEC = {
-  H264: 27,
-  HEVC: 173,
-  MP3: 86017,
-  AAC: 86018,
-  FLAC: 86028,
-  OPUS: 86076,
-};
 
 function securityHeaders() {
   return {
@@ -42,23 +27,7 @@ function htmlHeaders() {
   };
 }
 
-function jsHeaders() {
-  return {
-    "Content-Type": "application/javascript; charset=utf-8",
-    "Cache-Control": "public, max-age=31536000, immutable",
-    ...securityHeaders(),
-  };
-}
-
-function wasmHeaders() {
-  return {
-    "Content-Type": "application/wasm",
-    "Cache-Control": "public, max-age=31536000, immutable",
-    ...securityHeaders(),
-  };
-}
-
-async function proxyLibmedia(request, path) {
+async function proxyJavascript(request, path) {
   const cleanPath = path.replace(/^\/+/, "");
 
   if (!cleanPath || cleanPath.includes("..")) {
@@ -69,7 +38,7 @@ async function proxyLibmedia(request, path) {
   }
 
   const response = await fetch(
-    `${LIBMEDIA_CDN}/dist/umd/${cleanPath}`,
+    `${LIBMEDIA_CDN}/dist/esm/${cleanPath}`,
     {
       method: request.method,
       headers: request.headers,
@@ -78,7 +47,7 @@ async function proxyLibmedia(request, path) {
 
   if (!response.ok) {
     return new Response(
-      `libmedia CDN error: ${response.status} ${response.statusText}`,
+      `libmedia ESM error: ${response.status} ${response.statusText}`,
       {
         status: response.status,
         headers: securityHeaders(),
@@ -86,9 +55,77 @@ async function proxyLibmedia(request, path) {
     );
   }
 
+  const headers = new Headers(response.headers);
+
+  headers.set(
+    "Content-Type",
+    "application/javascript; charset=utf-8",
+  );
+
+  headers.set(
+    "Cache-Control",
+    "public, max-age=31536000, immutable",
+  );
+
+  headers.set(
+    "Cross-Origin-Resource-Policy",
+    "same-origin",
+  );
+
   return new Response(response.body, {
     status: response.status,
-    headers: jsHeaders(),
+    headers,
+  });
+}
+
+async function proxyAvutil(request, path) {
+  const cleanPath = path.replace(/^\/+/, "");
+
+  if (!cleanPath || cleanPath.includes("..")) {
+    return new Response("Invalid avutil path", {
+      status: 400,
+      headers: securityHeaders(),
+    });
+  }
+
+  const response = await fetch(
+    `${LIBMEDIA_CDN}/dist/avutil/esm/${cleanPath}`,
+    {
+      method: request.method,
+      headers: request.headers,
+    },
+  );
+
+  if (!response.ok) {
+    return new Response(
+      `avutil ESM error: ${response.status} ${response.statusText}`,
+      {
+        status: response.status,
+        headers: securityHeaders(),
+      },
+    );
+  }
+
+  const headers = new Headers(response.headers);
+
+  headers.set(
+    "Content-Type",
+    "application/javascript; charset=utf-8",
+  );
+
+  headers.set(
+    "Cache-Control",
+    "public, max-age=31536000, immutable",
+  );
+
+  headers.set(
+    "Cross-Origin-Resource-Policy",
+    "same-origin",
+  );
+
+  return new Response(response.body, {
+    status: response.status,
+    headers,
   });
 }
 
@@ -102,14 +139,14 @@ async function proxyWasm(request, path) {
     });
   }
 
-  const allowedDirectories = [
+  const allowed = [
     "decode/",
     "resample/",
     "stretchpitch/",
   ];
 
-  if (!allowedDirectories.some((prefix) => cleanPath.startsWith(prefix))) {
-    return new Response("Invalid WASM directory", {
+  if (!allowed.some((prefix) => cleanPath.startsWith(prefix))) {
+    return new Response("Invalid WASM path", {
       status: 400,
       headers: securityHeaders(),
     });
@@ -125,7 +162,7 @@ async function proxyWasm(request, path) {
 
   if (!response.ok) {
     return new Response(
-      `WASM CDN error: ${response.status} ${response.statusText}`,
+      `WASM error: ${response.status} ${response.statusText}`,
       {
         status: response.status,
         headers: securityHeaders(),
@@ -133,9 +170,21 @@ async function proxyWasm(request, path) {
     );
   }
 
+  const headers = new Headers(response.headers);
+
+  headers.set("Content-Type", "application/wasm");
+  headers.set(
+    "Cache-Control",
+    "public, max-age=31536000, immutable",
+  );
+  headers.set(
+    "Cross-Origin-Resource-Policy",
+    "same-origin",
+  );
+
   return new Response(response.body, {
     status: response.status,
-    headers: wasmHeaders(),
+    headers,
   });
 }
 
@@ -153,7 +202,7 @@ async function proxyMedia(request, env) {
 
   outputHeaders.set(
     "Access-Control-Allow-Origin",
-    request.headers.get("Origin") || "*",
+    "*",
   );
 
   outputHeaders.set(
@@ -253,17 +302,18 @@ function playerHtml() {
       right: 12px;
       bottom: 12px;
 
-      max-height: 45vh;
+      max-height: 50vh;
       overflow: auto;
 
       padding: 10px 12px;
       border-radius: 10px;
 
-      background: rgba(0, 0, 0, 0.78);
-      color: #fff;
+      background: rgba(0, 0, 0, 0.8);
 
+      color: #fff;
       font-size: 13px;
       line-height: 1.45;
+
       white-space: pre-wrap;
       word-break: break-word;
     }
@@ -272,76 +322,82 @@ function playerHtml() {
 
 <body>
   <div id="player"></div>
-  <div id="status">Loading libmedia...</div>
+  <div id="status">Loading...</div>
 
-  <script src="/libmedia/avplayer.js"></script>
+  <script type="module">
+    const statusElement =
+      document.getElementById("status");
 
-  <script>
-    const SOURCE = "/media";
-
-    const container = document.getElementById("player");
-    const statusElement = document.getElementById("status");
+    const container =
+      document.getElementById("player");
 
     function setStatus(message) {
       statusElement.textContent = message;
       console.log(message);
     }
 
-    function codecName(codecId) {
-      const names = {
-        27: "H.264",
-        173: "HEVC",
-        86017: "MP3",
-        86018: "AAC",
-        86028: "FLAC",
-        86076: "Opus",
-      };
-
-      return names[codecId] || String(codecId);
-    }
-
-    function wasmForCodec(codecId) {
-      switch (codecId) {
-        case 173:
-          return "/libmedia-wasm/decode/hevc-simd.wasm";
-
-        case 27:
-          return "/libmedia-wasm/decode/h264-simd.wasm";
-
-        case 86076:
-          return "/libmedia-wasm/decode/opus-simd.wasm";
-
-        case 86018:
-          return "/libmedia-wasm/decode/aac-simd.wasm";
-
-        case 86017:
-          return "/libmedia-wasm/decode/mp3-simd.wasm";
-
-        case 86028:
-          return "/libmedia-wasm/decode/flac-simd.wasm";
-
-        default:
-          return undefined;
+    function describeError(error) {
+      if (!error) {
+        return "Unknown error";
       }
+
+      const parts = [];
+
+      if (error.name) {
+        parts.push("name: " + error.name);
+      }
+
+      if (error.message) {
+        parts.push("message: " + error.message);
+      }
+
+      if (error.stack) {
+        parts.push("\\nstack:\\n" + error.stack);
+      }
+
+      return parts.join("\\n");
     }
 
     async function createPlayer() {
-      if (typeof AVPlayer === "undefined") {
+      setStatus(
+        "Loading libmedia ESM...\\n" +
+        "crossOriginIsolated: " +
+        crossOriginIsolated + "\\n" +
+        "SharedArrayBuffer: " +
+        ("SharedArrayBuffer" in window) + "\\n" +
+        "VideoDecoder: " +
+        ("VideoDecoder" in window),
+      );
+
+      const [
+        playerModule,
+        avutilModule,
+      ] = await Promise.all([
+        import("/libmedia/avplayer.js"),
+        import("/libmedia-avutil/avutil.js"),
+      ]);
+
+      const AVPlayer =
+        playerModule.default;
+
+      const AVCodecID =
+        avutilModule.AVCodecID;
+
+      if (typeof AVPlayer !== "function") {
         throw new Error(
-          "AVPlayer global is unavailable.",
+          "libmedia AVPlayer default export is unavailable.",
+        );
+      }
+
+      if (!AVCodecID) {
+        throw new Error(
+          "libmedia AVCodecID export is unavailable.",
         );
       }
 
       setStatus(
-        "libmedia loaded\\n" +
-        "crossOriginIsolated: " +
-        crossOriginIsolated +
-        "\\n" +
-        "SharedArrayBuffer: " +
-        ("SharedArrayBuffer" in window) +
-        "\\n" +
-        "WebCodecs: " +
-        ("VideoDecoder" in window),
+        "libmedia loaded successfully.\\n" +
+        "Creating AVPlayer...",
       );
 
       const player = new AVPlayer({
@@ -349,18 +405,34 @@ function playerHtml() {
 
         getWasm(type, codecId, mediaType) {
           console.log(
-            "getWasm",
-            "type=" + type,
-            "codec=" + codecName(codecId),
-            "codecId=" + codecId,
-            "mediaType=" + mediaType,
+            "getWasm:",
+            type,
+            codecId,
+            mediaType,
           );
 
           if (type === "decoder") {
-            const wasm = wasmForCodec(codecId);
+            switch (codecId) {
+              case AVCodecID.AV_CODEC_ID_AAC:
+                return "/libmedia-wasm/decode/aac-simd.wasm";
 
-            if (wasm) {
-              return wasm;
+              case AVCodecID.AV_CODEC_ID_MP3:
+                return "/libmedia-wasm/decode/mp3-simd.wasm";
+
+              case AVCodecID.AV_CODEC_ID_FLAC:
+                return "/libmedia-wasm/decode/flac-simd.wasm";
+
+              case AVCodecID.AV_CODEC_ID_H264:
+                return "/libmedia-wasm/decode/h264-simd.wasm";
+
+              case AVCodecID.AV_CODEC_ID_HEVC:
+                return "/libmedia-wasm/decode/hevc-simd.wasm";
+
+              case AVCodecID.AV_CODEC_ID_OPUS:
+                return "/libmedia-wasm/decode/opus-simd.wasm";
+
+              default:
+                return undefined;
             }
           }
 
@@ -376,30 +448,29 @@ function playerHtml() {
         },
       });
 
-      setStatus("Player created. Loading MKV...");
+      setStatus(
+        "AVPlayer created.\\n" +
+        "Loading MKV...",
+      );
 
-      await player.load(SOURCE);
+      await player.load("/media");
 
-      setStatus("MKV loaded. Starting playback...");
+      setStatus(
+        "MKV loaded.\\n" +
+        "Starting playback...",
+      );
 
       await player.play();
 
-      setStatus("Playing.");
+      setStatus("PLAYING");
     }
 
     createPlayer().catch((error) => {
       console.error(error);
 
-      const message =
-        error && error.stack
-          ? error.stack
-          : error && error.message
-            ? error.message
-            : String(error);
-
       setStatus(
         "ERROR\\n\\n" +
-        message,
+        describeError(error),
       );
     });
   </script>
@@ -417,7 +488,8 @@ export default {
           status: 204,
           headers: {
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+            "Access-Control-Allow-Methods":
+              "GET, HEAD, OPTIONS",
             "Access-Control-Allow-Headers": "*",
             ...securityHeaders(),
           },
@@ -438,17 +510,30 @@ export default {
         return proxyMedia(request, env);
       }
 
-      if (url.pathname.startsWith("/libmedia/")) {
-        return proxyLibmedia(
+      if (url.pathname.startsWith("/libmedia-avutil/")) {
+        return proxyAvutil(
           request,
-          url.pathname.substring("/libmedia/".length),
+          url.pathname.substring(
+            "/libmedia-avutil/".length,
+          ),
         );
       }
 
       if (url.pathname.startsWith("/libmedia-wasm/")) {
         return proxyWasm(
           request,
-          url.pathname.substring("/libmedia-wasm/".length),
+          url.pathname.substring(
+            "/libmedia-wasm/".length,
+          ),
+        );
+      }
+
+      if (url.pathname.startsWith("/libmedia/")) {
+        return proxyJavascript(
+          request,
+          url.pathname.substring(
+            "/libmedia/".length,
+          ),
         );
       }
 
@@ -466,7 +551,8 @@ export default {
         {
           status: 500,
           headers: {
-            "Content-Type": "text/plain; charset=utf-8",
+            "Content-Type":
+              "text/plain; charset=utf-8",
             ...securityHeaders(),
           },
         },
