@@ -1,627 +1,416 @@
-export default {
-  async fetch(request, env) {
-    return handleRequest(request, env);
-  },
-};
+/**
+ * src/index.js
+ *
+ * Cloudflare Worker:
+ * - iPhone-friendly MKV player
+ * - Service Binding: LOLI -> loli
+ * - HTTP Range proxy
+ * - Dynamic audio/subtitle tracks through Movi Player
+ */
 
 const DEFAULT_SOURCE =
   "https://loli.nvnyep.workers.dev/13102006/Colab_Torrent_Uploads/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01E01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D.mkv";
 
-const PLAYER_CDN =
+const MOVI_CDN =
   "https://cdn.jsdelivr.net/npm/movi-player@0.4.0/dist/element.js";
 
-const DEFAULT_ALLOWED_HOSTS = [
+const ALLOWED_HOSTS = new Set([
   "loli.nvnyep.workers.dev",
-];
+]);
 
-const SAFARI_IOS_USER_AGENT =
-  "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) " +
-  "AppleWebKit/605.1.15 (KHTML, like Gecko) " +
-  "Version/18.6 Mobile/15E148 Safari/604.1";
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+  "Access-Control-Allow-Headers":
+    "Range, Content-Type, Origin, Accept, User-Agent, Referer",
+  "Access-Control-Expose-Headers":
+    "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag, Last-Modified",
+};
 
-async function handleRequest(request, env) {
-  const url = new URL(request.url);
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
 
-  if (request.method === "OPTIONS") {
-    return corsResponse(null, 204);
-  }
-
-  if (url.pathname === "/proxy") {
-    return proxyMedia(request, env);
-  }
-
-  if (url.pathname === "/api/check") {
-    return checkSource(request, env);
-  }
-
-  if (url.pathname === "/api/health") {
-    return jsonResponse({
-      ok: true,
-      service: "mkv-player",
-      player: "movi-player@0.4.0",
-      userAgentMode: "Safari iPhone",
-    });
-  }
-
-  if (
-    url.pathname === "/" ||
-    url.pathname === "/index.html"
-  ) {
-    return new Response(renderPage(), {
-      headers: {
-        "content-type": "text/html; charset=UTF-8",
-        "cache-control": "no-store",
-      },
-    });
-  }
-
-  return new Response("Not Found", {
-    status: 404,
-  });
-}
-
-async function proxyMedia(request, env) {
-  const url = new URL(request.url);
-  const source = url.searchParams.get("url");
-
-  if (!source) {
-    return corsResponse("Missing ?url=", 400);
-  }
-
-  let sourceUrl;
-
-  try {
-    sourceUrl = validateSource(source, env);
-  } catch (error) {
-    return corsResponse(error.message, 403);
-  }
-
-  if (request.method === "HEAD") {
-    const result = await fetchSource(
-      sourceUrl,
-      request,
-      {
-        forceRange: true,
-      },
-    );
-
-    return corsResponse(
-      null,
-      result.response.status,
-      result.response.headers,
-    );
-  }
-
-  if (request.method !== "GET") {
-    return corsResponse(
-      "Method Not Allowed",
-      405,
-      {
-        Allow: "GET, HEAD, OPTIONS",
-      },
-    );
-  }
-
-  let result;
-
-  try {
-    result = await fetchSource(
-      sourceUrl,
-      request,
-    );
-  } catch (error) {
-    return corsResponse(
-      error instanceof Error
-        ? error.message
-        : String(error),
-      502,
-    );
-  }
-
-  if (
-    result.response.status === 404 ||
-    result.response.status === 416 ||
-    result.response.status === 400
-  ) {
-    if (request.headers.has("Range")) {
-      try {
-        result = await fetchSource(
-          sourceUrl,
-          request,
-          {
-            stripRange: true,
-          },
-        );
-      } catch (error) {
-        return corsResponse(
-          error instanceof Error
-            ? error.message
-            : String(error),
-          502,
-        );
+    try {
+      if (request.method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: CORS_HEADERS,
+        });
       }
-    }
-  }
 
-  return corsMediaResponse(
-    result.response,
-  );
-}
+      if (url.pathname === "/api/health") {
+        return jsonResponse({
+          ok: true,
+          serviceBinding: Boolean(env.LOLI),
+          binding: "LOLI",
+          targetWorker: "loli",
+          movi: MOVI_CDN,
+        });
+      }
 
-async function checkSource(request, env) {
-  const url = new URL(request.url);
-  const source = url.searchParams.get("url");
+      if (url.pathname === "/api/check") {
+        return await handleCheck(request, env);
+      }
 
-  if (!source) {
-    return jsonResponse(
-      {
-        ok: false,
-        error: "Missing ?url=",
-      },
-      400,
-    );
-  }
+      if (url.pathname === "/proxy") {
+        return await handleProxy(request, env);
+      }
 
-  let sourceUrl;
-
-  try {
-    sourceUrl = validateSource(
-      source,
-      env,
-    );
-  } catch (error) {
-    return jsonResponse(
-      {
-        ok: false,
-        error: error.message,
-      },
-      403,
-    );
-  }
-
-  const normal = await probeSource(
-    sourceUrl,
-  );
-
-  const range = await probeSource(
-    sourceUrl,
-    "bytes=0-0",
-  );
-
-  return jsonResponse({
-    ok: normal.ok || range.ok,
-    source: sourceUrl.toString(),
-    requestMode: "Safari iPhone User-Agent",
-    userAgent: SAFARI_IOS_USER_AGENT,
-    normal: normal.data,
-    range: range.data,
-    recommendation:
-      buildRecommendation(
-        normal,
-        range,
-      ),
-  });
-}
-
-async function probeSource(
-  sourceUrl,
-  range,
-) {
-  const headers =
-    createBrowserHeaders();
-
-  if (range) {
-    headers.set(
-      "Range",
-      range,
-    );
-  }
-
-  try {
-    const response = await fetch(
-      sourceUrl.toString(),
-      {
-        method: "GET",
-        headers,
-        redirect: "follow",
-      },
-    );
-
-    const data = {
-      status: response.status,
-      statusText: response.statusText,
-      contentType:
-        response.headers.get(
-          "content-type",
-        ),
-      contentLength:
-        response.headers.get(
-          "content-length",
-        ),
-      contentRange:
-        response.headers.get(
-          "content-range",
-        ),
-      acceptRanges:
-        response.headers.get(
-          "accept-ranges",
-        ),
-      finalUrl: response.url,
-    };
-
-    const ok =
-      response.ok ||
-      response.status === 206;
-
-    if (response.body) {
-      await response.body.cancel();
-    }
-
-    return {
-      ok,
-      data,
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      data: {
-        status: 0,
-        error:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      },
-    };
-  }
-}
-
-async function fetchSource(
-  sourceUrl,
-  request,
-  options = {},
-) {
-  const headers =
-    createBrowserHeaders();
-
-  const forwardHeaders = [
-    "Cache-Control",
-    "If-Modified-Since",
-    "If-None-Match",
-  ];
-
-  for (const name of forwardHeaders) {
-    const value =
-      request.headers.get(name);
-
-    if (value) {
-      headers.set(
-        name,
-        value,
+      return htmlResponse(renderPage());
+    } catch (error) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        500,
       );
     }
-  }
+  },
+};
 
-  const incomingRange =
-    request.headers.get("Range");
-
-  if (incomingRange) {
-    headers.set(
-      "Range",
-      incomingRange,
-    );
-  }
-
-  if (options.forceRange) {
-    headers.set(
-      "Range",
-      "bytes=0-0",
-    );
-  }
-
-  if (options.stripRange) {
-    headers.delete("Range");
-  }
-
-  const response = await fetch(
-    sourceUrl.toString(),
-    {
-      method: "GET",
-      headers,
-      redirect: "follow",
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      ...CORS_HEADERS,
     },
-  );
-
-  return {
-    response,
-  };
+  });
 }
 
-function createBrowserHeaders() {
-  const headers = new Headers();
-
-  headers.set(
-    "User-Agent",
-    SAFARI_IOS_USER_AGENT,
-  );
-
-  headers.set(
-    "Accept",
-    "video/mp4,video/webm,video/*;q=0.9,*/*;q=0.8",
-  );
-
-  headers.set(
-    "Accept-Language",
-    "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
-  );
-
-  headers.set(
-    "Accept-Encoding",
-    "identity",
-  );
-
-  headers.set(
-    "Referer",
-    "https://loli.nvnyep.workers.dev/",
-  );
-
-  headers.set(
-    "Origin",
-    "https://loli.nvnyep.workers.dev",
-  );
-
-  headers.set(
-    "Sec-Fetch-Dest",
-    "video",
-  );
-
-  headers.set(
-    "Sec-Fetch-Mode",
-    "cors",
-  );
-
-  headers.set(
-    "Sec-Fetch-Site",
-    "same-origin",
-  );
-
-  return headers;
+function htmlResponse(html) {
+  return new Response(html, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
 }
 
-function validateSource(
-  source,
-  env,
-) {
+function validateSource(rawSource) {
+  const source = rawSource || DEFAULT_SOURCE;
+
   let parsed;
 
   try {
     parsed = new URL(source);
   } catch {
-    throw new Error(
-      "URL MKV không hợp lệ.",
-    );
+    throw new Error("URL MKV không hợp lệ.");
   }
 
-  if (
-    parsed.protocol !== "https:"
-  ) {
-    throw new Error(
-      "Chỉ cho phép HTTPS.",
-    );
+  if (parsed.protocol !== "https:") {
+    throw new Error("Chỉ cho phép HTTPS.");
   }
 
-  const allowedHosts =
-    getAllowedHosts(env);
-
-  if (
-    !allowedHosts.includes("*") &&
-    !allowedHosts.includes(
-      parsed.hostname,
-    )
-  ) {
+  if (!ALLOWED_HOSTS.has(parsed.hostname)) {
     throw new Error(
-      `Host chưa được cho phép: ${parsed.hostname}. Hãy thêm host vào ALLOWED_HOSTS.`,
+      `Host không được phép: ${parsed.hostname}.`,
     );
   }
 
   return parsed;
 }
 
-function getAllowedHosts(env) {
-  const configured =
-    env?.ALLOWED_HOSTS;
+function getSourceFromRequest(url) {
+  const rawSource = url.searchParams.get("src");
 
-  if (!configured) {
-    return DEFAULT_ALLOWED_HOSTS;
+  if (!rawSource) {
+    return DEFAULT_SOURCE;
   }
 
-  return configured
-    .split(",")
-    .map((host) =>
-      host.trim().toLowerCase(),
-    )
-    .filter(Boolean);
+  return rawSource;
 }
 
-function buildRecommendation(
-  normal,
-  range,
-) {
-  if (
-    normal.ok &&
-    range.ok
-  ) {
-    return (
-      "Origin hoạt động và hỗ trợ Range. " +
-      "Request đã dùng User-Agent Safari iPhone."
-    );
+function buildBindingRequest(sourceUrl, request, method = "GET") {
+  const headers = new Headers();
+
+  const copyHeaders = [
+    "Accept",
+    "Accept-Encoding",
+    "Cache-Control",
+    "If-None-Match",
+    "If-Modified-Since",
+    "Range",
+    "Referer",
+    "User-Agent",
+  ];
+
+  for (const name of copyHeaders) {
+    const value = request.headers.get(name);
+
+    if (value) {
+      headers.set(name, value);
+    }
   }
 
-  if (
-    normal.ok &&
-    !range.ok
-  ) {
-    return (
-      "Origin trả file bình thường nhưng Range lỗi. " +
-      "Player sẽ thử chế độ linear; tua có thể hạn chế."
-    );
-  }
-
-  if (
-    !normal.ok &&
-    range.ok
-  ) {
-    return (
-      "Origin chỉ hoạt động với Range. " +
-      "Proxy sẽ chuyển tiếp Range cho player."
-    );
-  }
-
-  return (
-    "Origin không trả MKV thành công ở cả GET thường và Range. " +
-    "Nếu Safari thật tải được nhưng kết quả này vẫn 404, " +
-    "khả năng cao Worker loli đang xử lý Worker-to-Worker request khác với browser request."
-  );
-}
-
-function corsMediaResponse(
-  response,
-) {
-  const headers =
-    new Headers(
-      response.headers,
-    );
-
-  headers.set(
-    "Access-Control-Allow-Origin",
-    "*",
-  );
-
-  headers.set(
-    "Access-Control-Allow-Methods",
-    "GET, HEAD, OPTIONS",
-  );
-
-  headers.set(
-    "Access-Control-Allow-Headers",
-    [
-      "Range",
-      "Content-Type",
+  if (!headers.has("Accept")) {
+    headers.set(
       "Accept",
-      "Origin",
+      "*/*",
+    );
+  }
+
+  if (!headers.has("User-Agent")) {
+    headers.set(
       "User-Agent",
-    ].join(", "),
+      "Mozilla/5.0",
+    );
+  }
+
+  return new Request(sourceUrl.toString(), {
+    method,
+    headers,
+  });
+}
+
+async function fetchThroughLoli(
+  env,
+  sourceUrl,
+  request,
+  method = "GET",
+) {
+  if (!env.LOLI) {
+    throw new Error(
+      "Chưa cấu hình Service Binding LOLI. " +
+      "Vào Settings → Bindings → Add Service Binding → " +
+      "Variable name: LOLI → Service: loli.",
+    );
+  }
+
+  const bindingRequest = buildBindingRequest(
+    sourceUrl,
+    request,
+    method,
   );
 
-  headers.set(
-    "Access-Control-Expose-Headers",
-    [
-      "Accept-Ranges",
-      "Content-Length",
-      "Content-Range",
-      "Content-Type",
-      "ETag",
-      "Last-Modified",
-    ].join(", "),
+  return await env.LOLI.fetch(bindingRequest);
+}
+
+async function handleCheck(request, env) {
+  const requestUrl = new URL(request.url);
+  const rawSource = getSourceFromRequest(requestUrl);
+  const sourceUrl = validateSource(rawSource);
+
+  if (!env.LOLI) {
+    return jsonResponse(
+      {
+        ok: false,
+        error:
+          "Service Binding LOLI chưa được cấu hình.",
+        source: sourceUrl.toString(),
+        setup: {
+          variableName: "LOLI",
+          service: "loli",
+        },
+      },
+      503,
+    );
+  }
+
+  const headers = new Headers(request.headers);
+
+  headers.set("Range", "bytes=0-0");
+  headers.set("Accept", "*/*");
+
+  const probeRequest = new Request(
+    sourceUrl.toString(),
+    {
+      method: "GET",
+      headers,
+    },
   );
+
+  let response;
+
+  try {
+    response = await env.LOLI.fetch(probeRequest);
+  } catch (error) {
+    return jsonResponse(
+      {
+        ok: false,
+        source: sourceUrl.toString(),
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
+        recommendation:
+          "Service Binding LOLI không gọi được Worker loli.",
+      },
+      502,
+    );
+  }
+
+  const result = {
+    ok: response.ok || response.status === 206,
+    status: response.status,
+    statusText: response.statusText,
+    contentType:
+      response.headers.get("Content-Type"),
+    contentLength:
+      response.headers.get("Content-Length"),
+    contentRange:
+      response.headers.get("Content-Range"),
+    acceptRanges:
+      response.headers.get("Accept-Ranges"),
+    source: sourceUrl.toString(),
+    via: "Service Binding LOLI → loli",
+  };
+
+  if (!result.ok) {
+    result.recommendation =
+      "Worker loli đã nhận request nhưng không trả file thành công. " +
+      "Kiểm tra route/path của Worker loli.";
+  } else {
+    result.recommendation =
+      "Nguồn MKV hoạt động qua Service Binding. " +
+      "Có thể mở player.";
+  }
+
+  return jsonResponse(result);
+}
+
+async function handleProxy(request, env) {
+  const requestUrl = new URL(request.url);
+  const rawSource = getSourceFromRequest(requestUrl);
+  const sourceUrl = validateSource(rawSource);
+
+  if (!env.LOLI) {
+    return jsonResponse(
+      {
+        ok: false,
+        error:
+          "Service Binding LOLI chưa được cấu hình.",
+      },
+      503,
+    );
+  }
+
+  let upstream;
+
+  if (request.method === "HEAD") {
+    upstream = await fetchThroughLoli(
+      env,
+      sourceUrl,
+      request,
+      "HEAD",
+    );
+
+    if (
+      !upstream.ok &&
+      upstream.status !== 206
+    ) {
+      const rangeHeaders = new Headers(
+        request.headers,
+      );
+
+      rangeHeaders.set(
+        "Range",
+        "bytes=0-0",
+      );
+
+      const rangeRequest = new Request(
+        sourceUrl.toString(),
+        {
+          method: "GET",
+          headers: rangeHeaders,
+        },
+      );
+
+      const rangeResponse =
+        await env.LOLI.fetch(rangeRequest);
+
+      return buildProxyResponse(
+        rangeResponse,
+        true,
+      );
+    }
+
+    return buildProxyResponse(
+      upstream,
+      true,
+    );
+  }
+
+  upstream = await fetchThroughLoli(
+    env,
+    sourceUrl,
+    request,
+    "GET",
+  );
+
+  return buildProxyResponse(
+    upstream,
+    false,
+  );
+}
+
+function buildProxyResponse(upstream, headOnly) {
+  const headers = new Headers();
+
+  const responseHeaders = [
+    "Accept-Ranges",
+    "Cache-Control",
+    "Content-Disposition",
+    "Content-Length",
+    "Content-Range",
+    "Content-Type",
+    "ETag",
+    "Last-Modified",
+    "Vary",
+  ];
+
+  for (const name of responseHeaders) {
+    const value = upstream.headers.get(name);
+
+    if (value) {
+      headers.set(name, value);
+    }
+  }
+
+  if (!headers.has("Content-Type")) {
+    headers.set(
+      "Content-Type",
+      "video/x-matroska",
+    );
+  }
 
   headers.set(
     "Cache-Control",
     "no-store",
   );
 
+  for (const [name, value] of Object.entries(
+    CORS_HEADERS,
+  )) {
+    headers.set(name, value);
+  }
+
   return new Response(
-    response.body,
+    headOnly ? null : upstream.body,
     {
-      status: response.status,
-      statusText:
-        response.statusText,
+      status: upstream.status,
+      statusText: upstream.statusText,
       headers,
-    },
-  );
-}
-
-function corsResponse(
-  body,
-  status = 200,
-  extraHeaders = {},
-) {
-  const headers =
-    new Headers({
-      "Access-Control-Allow-Origin":
-        "*",
-      "Access-Control-Allow-Methods":
-        "GET, HEAD, OPTIONS",
-      "Access-Control-Allow-Headers":
-        [
-          "Range",
-          "Content-Type",
-          "Accept",
-          "Origin",
-          "User-Agent",
-        ].join(", "),
-      "Access-Control-Expose-Headers":
-        [
-          "Accept-Ranges",
-          "Content-Length",
-          "Content-Range",
-          "Content-Type",
-          "ETag",
-        ].join(", "),
-      "Cache-Control":
-        "no-store",
-      ...extraHeaders,
-    });
-
-  return new Response(
-    body,
-    {
-      status,
-      headers,
-    },
-  );
-}
-
-function jsonResponse(
-  data,
-  status = 200,
-) {
-  return new Response(
-    JSON.stringify(
-      data,
-      null,
-      2,
-    ),
-    {
-      status,
-      headers: {
-        "content-type":
-          "application/json; charset=UTF-8",
-        "cache-control":
-          "no-store",
-        "access-control-allow-origin":
-          "*",
-      },
     },
   );
 }
 
 function renderPage() {
-  const source =
-    escapeHtml(
-      DEFAULT_SOURCE,
-    );
-
   return `<!doctype html>
 <html lang="vi">
 <head>
   <meta charset="utf-8">
   <meta
     name="viewport"
-    content="width=device-width, initial-scale=1, viewport-fit=cover"
+    content="width=device-width,initial-scale=1,viewport-fit=cover"
   >
   <meta
     name="theme-color"
-    content="#09090b"
+    content="#000000"
   >
   <title>MKV Player</title>
 
@@ -633,29 +422,37 @@ function renderPage() {
         BlinkMacSystemFont,
         "Segoe UI",
         sans-serif;
-      background: #09090b;
-      color: #f4f4f5;
     }
 
     * {
       box-sizing: border-box;
     }
 
+    html,
     body {
       margin: 0;
-      min-height: 100vh;
-      background: #09090b;
+      min-height: 100%;
+      background: #000;
+      color: #fff;
     }
 
-    main {
-      width: min(1100px, 100%);
+    body {
+      padding:
+        env(safe-area-inset-top)
+        0
+        env(safe-area-inset-bottom);
+    }
+
+    .app {
+      width: 100%;
+      max-width: 1100px;
       margin: 0 auto;
       padding: 14px;
     }
 
     h1 {
-      margin: 4px 0 12px;
-      font-size: 20px;
+      margin: 4px 0 14px;
+      font-size: 22px;
     }
 
     .panel {
@@ -664,284 +461,256 @@ function renderPage() {
       margin-bottom: 12px;
     }
 
-    textarea {
+    input {
       width: 100%;
-      min-height: 92px;
-      resize: vertical;
-      border: 1px solid #27272a;
-      border-radius: 12px;
-      background: #18181b;
-      color: #f4f4f5;
-      padding: 12px;
-      font:
-        14px/1.45
-        ui-monospace,
-        SFMono-Regular,
-        Menlo,
-        monospace;
+      min-height: 46px;
+      padding: 10px 12px;
+      border: 1px solid #333;
+      border-radius: 10px;
+      background: #111;
+      color: #fff;
+      font-size: 14px;
       outline: none;
     }
 
-    textarea:focus {
-      border-color: #71717a;
+    input:focus {
+      border-color: #777;
     }
 
     .buttons {
       display: grid;
       grid-template-columns:
-        repeat(4, 1fr);
+        repeat(2, minmax(0, 1fr));
       gap: 8px;
     }
 
     button {
       min-height: 44px;
+      padding: 10px;
       border: 0;
       border-radius: 10px;
-      background: #27272a;
+      background: #222;
       color: #fff;
       font-weight: 600;
-      padding: 10px;
+      font-size: 14px;
       cursor: pointer;
-      touch-action: manipulation;
     }
 
     button:active {
       transform: scale(.98);
     }
 
-    button.primary {
-      background: #2563eb;
+    .primary {
+      background: #fff;
+      color: #000;
     }
 
-    button:disabled {
-      opacity: .5;
-      cursor: wait;
-    }
-
-    #status {
-      min-height: 24px;
-      color: #a1a1aa;
+    .status {
+      min-height: 22px;
+      color: #aaa;
       font-size: 13px;
-      white-space: pre-wrap;
-      word-break: break-word;
+      line-height: 1.4;
     }
 
-    #diagnostics {
-      display: none;
-      margin-top: 8px;
-      padding: 10px;
-      border-radius: 10px;
-      background: #111113;
-      border: 1px solid #27272a;
-      white-space: pre-wrap;
-      overflow: auto;
-      font:
-        12px/1.45
-        ui-monospace,
-        SFMono-Regular,
-        Menlo,
-        monospace;
-    }
-
-    #playerWrap {
+    .player {
       width: 100%;
       min-height: 240px;
-      aspect-ratio: 16 / 9;
-      background: #000;
-      border-radius: 12px;
       overflow: hidden;
+      border-radius: 12px;
+      background: #000;
     }
 
     movi-player {
       display: block;
       width: 100%;
-      height: 100%;
+      min-height: 240px;
       background: #000;
     }
 
-    .hint {
-      color: #71717a;
-      font-size: 12px;
-      margin-top: 8px;
+    pre {
+      max-height: 260px;
+      overflow: auto;
+      margin: 12px 0 0;
+      padding: 12px;
+      border-radius: 10px;
+      background: #0d0d0d;
+      color: #bbb;
+      font-size: 11px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
 
-    @media (max-width: 640px) {
-      main {
-        padding: 10px;
-      }
+    .hint {
+      margin-top: 10px;
+      color: #777;
+      font-size: 12px;
+      line-height: 1.5;
+    }
 
+    @media (min-width: 700px) {
       .buttons {
         grid-template-columns:
-          repeat(2, 1fr);
-      }
-
-      #playerWrap {
-        aspect-ratio: 16 / 9;
+          repeat(4, minmax(0, 1fr));
       }
     }
   </style>
 </head>
 
 <body>
-  <main>
-    <h1>MKV Player — iPhone</h1>
+  <main class="app">
+    <h1>MKV Player</h1>
 
     <section class="panel">
-      <textarea
+      <input
         id="source"
+        type="url"
+        inputmode="url"
+        autocomplete="off"
         spellcheck="false"
-      >${source}</textarea>
+        placeholder="Dán URL MKV..."
+      >
 
       <div class="buttons">
         <button
           id="play"
           class="primary"
-          type="button"
         >
           Phát
         </button>
 
-        <button
-          id="check"
-          type="button"
-        >
+        <button id="check">
           Kiểm tra nguồn
         </button>
 
-        <button
-          id="copy"
-          type="button"
-        >
+        <button id="copy">
           Copy link player
         </button>
 
-        <button
-          id="clear"
-          type="button"
-        >
+        <button id="clear">
           Xóa
         </button>
       </div>
 
-      <div id="status">
-        Đang khởi tạo player…
+      <div
+        id="status"
+        class="status"
+      >
+        Đang khởi tạo...
       </div>
-
-      <pre id="diagnostics"></pre>
     </section>
 
-    <div id="playerWrap">
+    <section class="player">
       <movi-player
         id="player"
         controls
-        playsinline
       ></movi-player>
-    </div>
+    </section>
+
+    <pre id="diagnostic"></pre>
 
     <div class="hint">
-      Subtitle/audio không hard-code.
-      Movi Player đọc các track nhúng trong MKV.
+      Subtitle và audio được đọc trực tiếp từ MKV.
+      Không hard-code ngôn ngữ.
     </div>
   </main>
 
   <script>
     (() => {
-      "use strict";
-
-      const MOVI_CDN =
-        ${JSON.stringify(PLAYER_CDN)};
-
       const sourceInput =
-        document.getElementById(
-          "source",
-        );
+        document.getElementById("source");
 
       const player =
-        document.getElementById(
-          "player",
-        );
-
-      const playButton =
-        document.getElementById(
-          "play",
-        );
-
-      const checkButton =
-        document.getElementById(
-          "check",
-        );
-
-      const copyButton =
-        document.getElementById(
-          "copy",
-        );
-
-      const clearButton =
-        document.getElementById(
-          "clear",
-        );
+        document.getElementById("player");
 
       const status =
-        document.getElementById(
-          "status",
-        );
+        document.getElementById("status");
 
-      const diagnostics =
-        document.getElementById(
-          "diagnostics",
-        );
+      const diagnostic =
+        document.getElementById("diagnostic");
+
+      const playButton =
+        document.getElementById("play");
+
+      const checkButton =
+        document.getElementById("check");
+
+      const copyButton =
+        document.getElementById("copy");
+
+      const clearButton =
+        document.getElementById("clear");
 
       let moviReady = false;
-      let loading = false;
 
-      function setStatus(message) {
-        status.textContent =
-          message;
+      const defaultSource =
+        ${JSON.stringify(DEFAULT_SOURCE)};
+
+      sourceInput.value =
+        getQuerySource() || defaultSource;
+
+      function getQuerySource() {
+        return new URLSearchParams(
+          window.location.search,
+        ).get("src") || "";
       }
 
-      function setBusy(
-        button,
-        busy,
-      ) {
-        button.disabled =
-          busy;
+      function setStatus(message) {
+        status.textContent = message;
+      }
+
+      function showDiagnostic(value) {
+        if (
+          value === null ||
+          value === undefined
+        ) {
+          diagnostic.textContent = "";
+          return;
+        }
+
+        diagnostic.textContent =
+          typeof value === "string"
+            ? value
+            : JSON.stringify(
+                value,
+                null,
+                2,
+              );
       }
 
       function getSource() {
         return sourceInput.value.trim();
       }
 
-      function getPlayerUrl() {
-        const source =
-          getSource();
-
-        if (!source) {
-          throw new Error(
-            "Chưa nhập URL MKV.",
+      function buildPlayerUrl(source) {
+        const url =
+          new URL(
+            window.location.href,
           );
-        }
 
-        return (
-          location.origin +
-          "/proxy?url=" +
-          encodeURIComponent(
-            source,
-          )
+        url.search = "";
+
+        url.searchParams.set(
+          "src",
+          source,
         );
+
+        return url.toString();
       }
 
-      function showDiagnostics(
-        data,
-      ) {
-        diagnostics.style.display =
-          "block";
-
-        diagnostics.textContent =
-          JSON.stringify(
-            data,
-            null,
-            2,
+      function buildProxyUrl(source) {
+        const url =
+          new URL(
+            "/proxy",
+            window.location.origin,
           );
+
+        url.searchParams.set(
+          "src",
+          source,
+        );
+
+        return url.toString();
       }
 
       async function loadMovi() {
@@ -950,15 +719,11 @@ function renderPage() {
         }
 
         setStatus(
-          "Đang tải Movi Player…",
+          "Đang tải MKV player...",
         );
 
         await import(
-          MOVI_CDN
-        );
-
-        await customElements.whenDefined(
-          "movi-player",
+          ${JSON.stringify(MOVI_CDN)}
         );
 
         moviReady = true;
@@ -969,203 +734,165 @@ function renderPage() {
       }
 
       async function play() {
-        if (loading) {
+        const source = getSource();
+
+        if (!source) {
+          setStatus(
+            "Hãy nhập URL MKV.",
+          );
           return;
         }
 
-        loading = true;
-        setBusy(
-          playButton,
-          true,
-        );
-
-        diagnostics.style.display =
-          "none";
+        try {
+          new URL(source);
+        } catch {
+          setStatus(
+            "URL không hợp lệ.",
+          );
+          return;
+        }
 
         try {
           await loadMovi();
 
           const proxyUrl =
-            getPlayerUrl();
+            buildProxyUrl(source);
 
-          player.src =
-            proxyUrl;
-
-          setStatus(
-            "Đã gửi MKV vào player. " +
-            "Đang đọc container và track…",
+          player.setAttribute(
+            "src",
+            proxyUrl,
           );
 
-          if (
-            typeof player.play ===
-            "function"
-          ) {
-            try {
-              await player.play();
-            } catch {
-              setStatus(
-                "MKV đã được nạp. " +
-                "Bấm Play trong player để bắt đầu.",
-              );
-            }
-          }
+          player.setAttribute(
+            "controls",
+            "",
+          );
+
+          const playerUrl =
+            buildPlayerUrl(source);
+
+          window.history.replaceState(
+            null,
+            "",
+            playerUrl,
+          );
+
+          setStatus(
+            "Đang mở MKV. Subtitle/audio sẽ được đọc tự động...",
+          );
         } catch (error) {
           setStatus(
-            "Lỗi: " +
+            "Không tải được player: " +
             (
-              error instanceof Error
-                ? error.message
-                : String(error)
+              error?.message ||
+              String(error)
             ),
           );
-        } finally {
-          loading = false;
 
-          setBusy(
-            playButton,
-            false,
-          );
+          showDiagnostic({
+            error:
+              error?.message ||
+              String(error),
+          });
         }
       }
 
-      async function check() {
-        const source =
-          getSource();
+      async function checkSource() {
+        const source = getSource();
 
         if (!source) {
           setStatus(
-            "Chưa nhập URL MKV.",
+            "Hãy nhập URL MKV.",
           );
           return;
         }
 
-        setBusy(
-          checkButton,
-          true,
-        );
-
-        diagnostics.style.display =
-          "none";
-
         setStatus(
-          "Đang kiểm tra bằng Safari iPhone User-Agent…",
+          "Đang kiểm tra qua Service Binding LOLI...",
         );
 
         try {
-          const response =
-            await fetch(
-              "/api/check?url=" +
-              encodeURIComponent(
-                source,
-              ),
-              {
-                cache:
-                  "no-store",
-              },
+          const url =
+            new URL(
+              "/api/check",
+              window.location.origin,
             );
+
+          url.searchParams.set(
+            "src",
+            source,
+          );
+
+          const response =
+            await fetch(url, {
+              method: "GET",
+              cache: "no-store",
+            });
 
           const data =
             await response.json();
 
-          showDiagnostics(
-            data,
-          );
+          showDiagnostic(data);
 
           if (data.ok) {
             setStatus(
-              "Nguồn OK. Xem kết quả chi tiết bên dưới.",
+              "OK: Worker loli trả được MKV.",
             );
           } else {
             setStatus(
-              "Nguồn chưa OK. Xem lỗi bên dưới.",
+              "Nguồn chưa trả MKV thành công.",
             );
           }
         } catch (error) {
           setStatus(
-            "Không gọi được API kiểm tra: " +
-            (
-              error instanceof Error
-                ? error.message
-                : String(error)
-            ),
+            "Lỗi kiểm tra nguồn.",
           );
-        } finally {
-          setBusy(
-            checkButton,
-            false,
-          );
+
+          showDiagnostic({
+            error:
+              error?.message ||
+              String(error),
+          });
         }
       }
 
-      async function copyPlayerLink() {
+      async function copyPlayerUrl() {
+        const source = getSource();
+
+        if (!source) {
+          setStatus(
+            "Hãy nhập URL MKV.",
+          );
+          return;
+        }
+
+        const playerUrl =
+          buildPlayerUrl(source);
+
         try {
-          const link =
-            getPlayerUrl();
-
-          if (
-            navigator.clipboard &&
-            window.isSecureContext
-          ) {
-            await navigator.clipboard.writeText(
-              link,
-            );
-          } else {
-            const area =
-              document.createElement(
-                "textarea",
-              );
-
-            area.value =
-              link;
-
-            area.style.position =
-              "fixed";
-
-            area.style.opacity =
-              "0";
-
-            document.body.appendChild(
-              area,
-            );
-
-            area.focus();
-            area.select();
-
-            document.execCommand(
-              "copy",
-            );
-
-            area.remove();
-          }
+          await navigator.clipboard.writeText(
+            playerUrl,
+          );
 
           setStatus(
             "Đã copy link player.",
           );
-        } catch (error) {
+        } catch {
+          sourceInput.value =
+            playerUrl;
+
+          sourceInput.select();
+
           setStatus(
-            "Không copy được: " +
-            (
-              error instanceof Error
-                ? error.message
-                : String(error)
-            ),
+            "Không thể tự copy. Link player đã được đưa vào ô trên.",
           );
         }
       }
 
-      function clear() {
-        sourceInput.value =
-          "";
-
-        player.removeAttribute(
-          "src",
-        );
-
-        diagnostics.style.display =
-          "none";
-
-        diagnostics.textContent =
-          "";
+      function clearPlayer() {
+        player.removeAttribute("src");
+        sourceInput.value = "";
+        showDiagnostic("");
 
         setStatus(
           "Đã xóa.",
@@ -1179,101 +906,32 @@ function renderPage() {
 
       checkButton.addEventListener(
         "click",
-        check,
+        checkSource,
       );
 
       copyButton.addEventListener(
         "click",
-        copyPlayerLink,
+        copyPlayerUrl,
       );
 
       clearButton.addEventListener(
         "click",
-        clear,
+        clearPlayer,
       );
 
-      const params =
-        new URLSearchParams(
-          location.search,
+      loadMovi().catch((error) => {
+        setStatus(
+          "Player CDN chưa tải được. Bạn vẫn có thể kiểm tra nguồn.",
         );
 
-      const querySource =
-        params.get("url");
-
-      if (querySource) {
-        sourceInput.value =
-          querySource;
-      }
-
-      player.addEventListener(
-        "loadstart",
-        () => {
-          setStatus(
-            "Player bắt đầu đọc MKV…",
-          );
-        },
-      );
-
-      player.addEventListener(
-        "loadedmetadata",
-        () => {
-          setStatus(
-            "Đã đọc metadata. " +
-            "Các audio/subtitle track được lấy trực tiếp từ MKV.",
-          );
-        },
-      );
-
-      player.addEventListener(
-        "error",
-        (event) => {
-          const detail =
-            event &&
-            event.detail
-              ? event.detail
-              : "";
-
-          setStatus(
-            "Player báo lỗi." +
-            (
-              detail
-                ? " " +
-                  String(detail)
-                : ""
-            ),
-          );
-        },
-      );
-
-      loadMovi().catch(
-        () => {},
-      );
+        showDiagnostic({
+          moviError:
+            error?.message ||
+            String(error),
+        });
+      });
     })();
   </script>
 </body>
 </html>`;
-}
-
-function escapeHtml(value) {
-  return value
-    .replaceAll(
-      "&",
-      "&amp;",
-    )
-    .replaceAll(
-      "<",
-      "&lt;",
-    )
-    .replaceAll(
-      ">",
-      "&gt;",
-    )
-    .replaceAll(
-      '"',
-      "&quot;",
-    )
-    .replaceAll(
-      "'",
-      "&#039;",
-    );
 }
