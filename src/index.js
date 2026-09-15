@@ -3,26 +3,19 @@ const SOURCE_URL =
 
 const TRACKS_ID = 0x1654ae6b;
 const TRACK_ENTRY_ID = 0xae;
-
 const TRACK_NUMBER_ID = 0xd7;
 const TRACK_TYPE_ID = 0x83;
 const CODEC_ID = 0x86;
+const CODEC_PRIVATE_ID = 0x63a2;
 const NAME_ID = 0x536e;
 const LANGUAGE_ID = 0x22b59c;
-const DEFAULT_FLAG_ID = 0x88;
-const FORCED_FLAG_ID = 0x55aa;
 const VIDEO_ID = 0xe0;
 const AUDIO_ID = 0xe1;
 const PIXEL_WIDTH_ID = 0xb0;
 const PIXEL_HEIGHT_ID = 0xba;
-const BIT_DEPTH_ID = 0x6264;
-const SAMPLING_FREQUENCY_ID = 0xb5;
-const CHANNELS_ID = 0x9f;
 
 function readVint(bytes, offset, forSize = false) {
-  if (offset >= bytes.length) {
-    return null;
-  }
+  if (offset >= bytes.length) return null;
 
   const first = bytes[offset];
 
@@ -44,7 +37,10 @@ function readVint(bytes, offset, forSize = false) {
     value = value * 256 + bytes[offset + i];
   }
 
-  if (forSize && value === Math.pow(2, 7 * length) - 1) {
+  if (
+    forSize &&
+    value === Math.pow(2, 7 * length) - 1
+  ) {
     return {
       length,
       value: -1,
@@ -62,9 +58,7 @@ function readVint(bytes, offset, forSize = false) {
 function readElementId(bytes, offset) {
   const vint = readVint(bytes, offset);
 
-  if (!vint) {
-    return null;
-  }
+  if (!vint) return null;
 
   let value = 0;
 
@@ -81,36 +75,32 @@ function readElementId(bytes, offset) {
 function readElement(bytes, offset) {
   const id = readElementId(bytes, offset);
 
-  if (!id) {
-    return null;
-  }
+  if (!id) return null;
 
-  const size = readVint(bytes, offset + id.length, true);
+  const size = readVint(
+    bytes,
+    offset + id.length,
+    true
+  );
 
-  if (!size) {
-    return null;
-  }
+  if (!size) return null;
 
-  const dataStart = offset + id.length + size.length;
+  const dataStart =
+    offset + id.length + size.length;
 
   if (dataStart > bytes.length) {
     return null;
   }
 
-  let dataEnd;
-
-  if (size.unknown) {
-    dataEnd = bytes.length;
-  } else {
-    dataEnd = Math.min(
-      dataStart + size.value,
-      bytes.length
-    );
-  }
+  const dataEnd = size.unknown
+    ? bytes.length
+    : Math.min(
+        dataStart + size.value,
+        bytes.length
+      );
 
   return {
     id: id.id,
-    offset,
     dataStart,
     dataEnd,
     size: size.value,
@@ -128,114 +118,163 @@ function readUnsigned(bytes, start, end) {
   return value;
 }
 
-function readFloat(bytes, start, end) {
-  const length = end - start;
-
-  if (length !== 4 && length !== 8) {
-    return null;
-  }
-
-  const view = new DataView(
-    bytes.buffer,
-    bytes.byteOffset + start,
-    length
-  );
-
-  return length === 4
-    ? view.getFloat32(0, false)
-    : view.getFloat64(0, false);
-}
-
 function readString(bytes, start, end) {
   return new TextDecoder("utf-8").decode(
     bytes.subarray(start, end)
   );
 }
 
-function parseVideo(bytes, start, end) {
-  const video = {};
-  let offset = start;
+function findTracks(bytes) {
+  let offset = 0;
 
-  while (offset < end) {
+  while (offset < bytes.length) {
     const element = readElement(bytes, offset);
 
-    if (!element || element.dataStart > end) {
-      break;
+    if (!element) break;
+
+    if (element.id === TRACKS_ID) {
+      return element;
     }
 
-    const dataEnd = Math.min(element.dataEnd, end);
+    if (element.dataEnd <= offset) break;
 
-    if (element.id === PIXEL_WIDTH_ID) {
-      video.width = readUnsigned(
-        bytes,
-        element.dataStart,
-        dataEnd
-      );
-    }
-
-    if (element.id === PIXEL_HEIGHT_ID) {
-      video.height = readUnsigned(
-        bytes,
-        element.dataStart,
-        dataEnd
-      );
-    }
-
-    if (element.id === BIT_DEPTH_ID) {
-      video.bitDepth = readUnsigned(
-        bytes,
-        element.dataStart,
-        dataEnd
-      );
-    }
-
-    if (dataEnd <= offset) {
-      break;
-    }
-
-    offset = dataEnd;
+    offset = element.dataEnd;
   }
 
-  return video;
+  return null;
 }
 
-function parseAudio(bytes, start, end) {
-  const audio = {};
-  let offset = start;
+function parseCodecPrivate(bytes, start, end) {
+  const privateBytes = bytes.slice(start, end);
 
-  while (offset < end) {
-    const element = readElement(bytes, offset);
+  const result = {
+    size: privateBytes.length,
+    firstBytes: Array.from(
+      privateBytes.slice(0, 32)
+    )
+      .map(byte =>
+        byte.toString(16).padStart(2, "0")
+      )
+      .join(" "),
+  };
 
-    if (!element || element.dataStart > end) {
-      break;
-    }
-
-    const dataEnd = Math.min(element.dataEnd, end);
-
-    if (element.id === SAMPLING_FREQUENCY_ID) {
-      audio.sampleRate = readFloat(
-        bytes,
-        element.dataStart,
-        dataEnd
-      );
-    }
-
-    if (element.id === CHANNELS_ID) {
-      audio.channels = readUnsigned(
-        bytes,
-        element.dataStart,
-        dataEnd
-      );
-    }
-
-    if (dataEnd <= offset) {
-      break;
-    }
-
-    offset = dataEnd;
+  if (privateBytes.length < 23) {
+    result.error =
+      "CodecPrivate quá ngắn để là HEVCDecoderConfigurationRecord";
+    return result;
   }
 
-  return audio;
+  const configurationVersion = privateBytes[0];
+
+  const profileSpace =
+    (privateBytes[1] >> 6) & 0x03;
+
+  const tierFlag =
+    (privateBytes[1] >> 5) & 0x01;
+
+  const profileIdc =
+    privateBytes[1] & 0x1f;
+
+  const compatibilityFlags =
+    (
+      privateBytes[2] * 0x1000000 +
+      privateBytes[3] * 0x10000 +
+      privateBytes[4] * 0x100 +
+      privateBytes[5]
+    ) >>> 0;
+
+  const constraint48 =
+    Number(
+      (
+        BigInt(privateBytes[6]) << 40n |
+        BigInt(privateBytes[7]) << 32n |
+        BigInt(privateBytes[8]) << 24n |
+        BigInt(privateBytes[9]) << 16n |
+        BigInt(privateBytes[10]) << 8n |
+        BigInt(privateBytes[11])
+      )
+    );
+
+  const levelIdc = privateBytes[12];
+
+  const minSpatialSegmentation =
+    ((privateBytes[13] & 0x0f) << 8) |
+    privateBytes[14];
+
+  const parallelismType =
+    privateBytes[15] & 0x03;
+
+  const chromaFormat =
+    privateBytes[16] & 0x03;
+
+  const bitDepthLumaMinus8 =
+    privateBytes[17] & 0x07;
+
+  const bitDepthChromaMinus8 =
+    privateBytes[18] & 0x07;
+
+  const avgFrameRate =
+    (privateBytes[19] << 8) |
+    privateBytes[20];
+
+  const constantFrameRate =
+    (privateBytes[21] >> 6) & 0x03;
+
+  const numTemporalLayers =
+    (privateBytes[21] >> 3) & 0x07;
+
+  const temporalIdNested =
+    (privateBytes[21] >> 2) & 0x01;
+
+  const lengthSizeMinusOne =
+    privateBytes[21] & 0x03;
+
+  const numOfArrays = privateBytes[22];
+
+  let profileName = "Unknown";
+
+  if (profileIdc === 1) {
+    profileName = "Main";
+  } else if (profileIdc === 2) {
+    profileName = "Main 10";
+  } else if (profileIdc === 3) {
+    profileName = "Main Still Picture";
+  }
+
+  result.configurationVersion = configurationVersion;
+  result.profileSpace = profileSpace;
+  result.profileIdc = profileIdc;
+  result.profileName = profileName;
+  result.tierFlag = tierFlag;
+  result.tier = tierFlag ? "High" : "Main";
+  result.levelIdc = levelIdc;
+  result.level = (levelIdc / 30).toFixed(1);
+  result.chromaFormat = chromaFormat;
+  result.bitDepthLuma = 8 + bitDepthLumaMinus8;
+  result.bitDepthChroma = 8 + bitDepthChromaMinus8;
+  result.avgFrameRate = avgFrameRate
+    ? avgFrameRate / 256
+    : null;
+  result.numTemporalLayers = numTemporalLayers;
+  result.temporalIdNested = Boolean(
+    temporalIdNested
+  );
+  result.naluLengthSize =
+    lengthSizeMinusOne + 1;
+  result.numOfArrays = numOfArrays;
+
+  result.compatibilityFlags =
+    "0x" +
+    compatibilityFlags
+      .toString(16)
+      .padStart(8, "0");
+
+  result.constraintFlags =
+    constraint48
+      .toString(16)
+      .padStart(12, "0");
+
+  return result;
 }
 
 function parseTrackEntry(bytes, start, end) {
@@ -245,10 +284,8 @@ function parseTrackEntry(bytes, start, end) {
     codecId: null,
     name: null,
     language: null,
-    default: null,
-    forced: null,
+    codecPrivate: null,
     video: {},
-    audio: {},
   };
 
   let offset = start;
@@ -256,11 +293,10 @@ function parseTrackEntry(bytes, start, end) {
   while (offset < end) {
     const element = readElement(bytes, offset);
 
-    if (!element || element.dataStart > end) {
-      break;
-    }
+    if (!element) break;
 
-    const dataEnd = Math.min(element.dataEnd, end);
+    const dataEnd =
+      Math.min(element.dataEnd, end);
 
     switch (element.id) {
       case TRACK_NUMBER_ID:
@@ -287,6 +323,15 @@ function parseTrackEntry(bytes, start, end) {
         );
         break;
 
+      case CODEC_PRIVATE_ID:
+        track.codecPrivate =
+          parseCodecPrivate(
+            bytes,
+            element.dataStart,
+            dataEnd
+          );
+        break;
+
       case NAME_ID:
         track.name = readString(
           bytes,
@@ -303,51 +348,55 @@ function parseTrackEntry(bytes, start, end) {
         );
         break;
 
-      case DEFAULT_FLAG_ID:
-        track.default = Boolean(
-          readUnsigned(
-            bytes,
-            element.dataStart,
-            dataEnd
-          )
-        );
-        break;
-
-      case FORCED_FLAG_ID:
-        track.forced = Boolean(
-          readUnsigned(
-            bytes,
-            element.dataStart,
-            dataEnd
-          )
-        );
-        break;
-
       case VIDEO_ID:
-        track.video = parseVideo(
+        parseVideo(
           bytes,
           element.dataStart,
-          dataEnd
-        );
-        break;
-
-      case AUDIO_ID:
-        track.audio = parseAudio(
-          bytes,
-          element.dataStart,
-          dataEnd
+          dataEnd,
+          track.video
         );
         break;
     }
 
-    if (dataEnd <= offset) {
-      break;
-    }
+    if (dataEnd <= offset) break;
 
     offset = dataEnd;
   }
 
   return track;
+}
+
+function parseVideo(bytes, start, end, video) {
+  let offset = start;
+
+  while (offset < end) {
+    const element = readElement(bytes, offset);
+
+    if (!element) break;
+
+    const dataEnd =
+      Math.min(element.dataEnd, end);
+
+    if (element.id === PIXEL_WIDTH_ID) {
+      video.width = readUnsigned(
+        bytes,
+        element.dataStart,
+        dataEnd
+      );
+    }
+
+    if (element.id === PIXEL_HEIGHT_ID) {
+      video.height = readUnsigned(
+        bytes,
+        element.dataStart,
+        dataEnd
+      );
+    }
+
+    if (dataEnd <= offset) break;
+
+    offset = dataEnd;
+  }
 }
 
 function parseTracks(bytes, start, end) {
@@ -357,11 +406,10 @@ function parseTracks(bytes, start, end) {
   while (offset < end) {
     const element = readElement(bytes, offset);
 
-    if (!element || element.dataStart > end) {
-      break;
-    }
+    if (!element) break;
 
-    const dataEnd = Math.min(element.dataEnd, end);
+    const dataEnd =
+      Math.min(element.dataEnd, end);
 
     if (element.id === TRACK_ENTRY_ID) {
       tracks.push(
@@ -373,59 +421,12 @@ function parseTracks(bytes, start, end) {
       );
     }
 
-    if (dataEnd <= offset) {
-      break;
-    }
+    if (dataEnd <= offset) break;
 
     offset = dataEnd;
   }
 
   return tracks;
-}
-
-function findTracksElement(bytes) {
-  let offset = 0;
-
-  while (offset < bytes.length) {
-    const element = readElement(bytes, offset);
-
-    if (!element) {
-      break;
-    }
-
-    if (element.id === TRACKS_ID) {
-      return element;
-    }
-
-    if (element.dataEnd <= offset) {
-      break;
-    }
-
-    offset = element.dataEnd;
-  }
-
-  return null;
-}
-
-function scanForTracks(bytes) {
-  const positions = [];
-
-  for (
-    let i = 0;
-    i <= bytes.length - 4;
-    i++
-  ) {
-    if (
-      bytes[i] === 0x16 &&
-      bytes[i + 1] === 0x54 &&
-      bytes[i + 2] === 0xae &&
-      bytes[i + 3] === 0x6b
-    ) {
-      positions.push(i);
-    }
-  }
-
-  return positions;
 }
 
 async function inspect(env) {
@@ -444,45 +445,33 @@ async function inspect(env) {
     );
   }
 
-  const buffer = await response.arrayBuffer();
+  const buffer =
+    await response.arrayBuffer();
+
   const bytes = new Uint8Array(buffer);
 
-  const positions = scanForTracks(bytes);
+  const tracksElement =
+    findTracks(bytes);
 
-  const results = [];
-
-  for (const position of positions) {
-    const element = readElement(bytes, position);
-
-    if (!element) {
-      results.push({
-        position,
-        error: "Cannot parse Tracks element",
-      });
-      continue;
-    }
-
-    const tracks = parseTracks(
-      bytes,
-      element.dataStart,
-      element.dataEnd
+  if (!tracksElement) {
+    throw new Error(
+      "Không tìm thấy Tracks"
     );
-
-    results.push({
-      position,
-      size: element.size,
-      dataStart: element.dataStart,
-      dataEnd: element.dataEnd,
-      tracks,
-    });
   }
+
+  const tracks = parseTracks(
+    bytes,
+    tracksElement.dataStart,
+    tracksElement.dataEnd
+  );
 
   return {
     ok: true,
     httpStatus: response.status,
     bytesRead: bytes.length,
-    contentRange: response.headers.get("content-range"),
-    tracksElements: results,
+    contentRange:
+      response.headers.get("content-range"),
+    tracks,
   };
 }
 
@@ -495,7 +484,7 @@ function page() {
     name="viewport"
     content="width=device-width,initial-scale=1"
   >
-  <title>MKV Track Parser</title>
+  <title>HEVC Codec Test</title>
 
   <style>
     body {
@@ -517,17 +506,16 @@ function page() {
       word-break: break-word;
       line-height: 1.5;
       font-size: 13px;
-      overflow-x: auto;
     }
   </style>
 </head>
 
 <body>
-  <h2>MKV Track Parser</h2>
+  <h2>HEVC Codec Information</h2>
   <pre id="result">Đang đọc...</pre>
 
   <script>
-    fetch("/api/tracks")
+    fetch("/api/codec")
       .then(async response => {
         const data = await response.json();
 
@@ -547,7 +535,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    if (url.pathname === "/api/tracks") {
+    if (url.pathname === "/api/codec") {
       try {
         return Response.json(
           await inspect(env),
@@ -574,7 +562,8 @@ export default {
 
     return new Response(page(), {
       headers: {
-        "Content-Type": "text/html; charset=UTF-8",
+        "Content-Type":
+          "text/html; charset=UTF-8",
         "Cache-Control": "no-store",
       },
     });
