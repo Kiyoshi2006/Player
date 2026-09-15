@@ -1,144 +1,141 @@
-const SOURCE_URL =
-  "https://loli.nvnyep.workers.dev/13102006/Colab_Torrent_Uploads/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01E01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D.mkv";
-
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-    "Access-Control-Allow-Headers":
-      "Range, Content-Type, Accept, Origin, User-Agent",
-    "Access-Control-Expose-Headers":
-      "Accept-Ranges, Content-Length, Content-Range, Content-Type",
-  };
-}
-
-async function proxyMedia(request, env) {
-  const headers = new Headers();
-
-  for (const name of ["Range", "Accept"]) {
-    const value = request.headers.get(name);
-    if (value) {
-      headers.set(name, value);
-    }
-  }
-
-  const upstream = new Request(SOURCE_URL, {
-    method: request.method === "HEAD" ? "HEAD" : "GET",
-    headers,
-  });
-
-  const response = await env.LOLI.fetch(upstream);
-
-  const responseHeaders = new Headers(corsHeaders());
-
-  for (const name of [
-    "Content-Type",
-    "Content-Length",
-    "Content-Range",
-    "Accept-Ranges",
-    "ETag",
-    "Last-Modified",
-  ]) {
-    const value = response.headers.get(name);
-    if (value !== null) {
-      responseHeaders.set(name, value);
-    }
-  }
-
-  return new Response(
-    request.method === "HEAD" ? null : response.body,
-    {
-      status: response.status,
-      statusText: response.statusText,
-      headers: responseHeaders,
-    }
-  );
-}
-
-function playerHtml(request) {
-  const playerUrl = new URL("/media", request.url).href;
-
+function testPage() {
   return `<!doctype html>
-<html lang="en">
+<html lang="vi">
 <head>
   <meta charset="utf-8">
   <meta
     name="viewport"
-    content="width=device-width,initial-scale=1,viewport-fit=cover"
+    content="width=device-width, initial-scale=1, viewport-fit=cover"
   >
-  <title>MKV Test Player</title>
-
-  <script type="module"
-    src="https://cdn.jsdelivr.net/npm/movi-player@0.4.0/dist/element.js">
-  </script>
-
+  <title>HEVC Hardware Test</title>
   <style>
-    html,
     body {
       margin: 0;
-      padding: 0;
-      background: #000;
-      min-height: 100%;
+      padding: 24px;
+      background: #111;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     }
 
-    body {
-      display: flex;
-      align-items: center;
-      justify-content: center;
+    h1 {
+      font-size: 22px;
     }
 
-    movi-player {
-      display: block;
-      width: 100vw;
-      height: 100vh;
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #222;
+      padding: 16px;
+      border-radius: 12px;
+      line-height: 1.6;
+    }
+
+    .ok {
+      color: #4ade80;
+    }
+
+    .warn {
+      color: #facc15;
+    }
+
+    .bad {
+      color: #f87171;
     }
   </style>
 </head>
 <body>
-  <movi-player
-    src="${playerUrl}"
-    controls
-    autoplay="false">
-  </movi-player>
+  <h1>iPhone HEVC Hardware Decode Test</h1>
+  <pre id="result">Đang kiểm tra...</pre>
+
+  <script>
+    async function runTest() {
+      const result = document.getElementById("result");
+      const lines = [];
+
+      const hevcTypes = [
+        "video/mp4; codecs=\\"hvc1.1.6.L123.B0\\"",
+        "video/mp4; codecs=\\"hev1.1.6.L123.B0\\"",
+        "video/mp4; codecs=\\"hvc1.2.4.L153.B0\\""
+      ];
+
+      lines.push(
+        "Safari: " +
+        (/Safari/i.test(navigator.userAgent) ? "YES" : "NO")
+      );
+
+      lines.push(
+        "MediaCapabilities: " +
+        (navigator.mediaCapabilities ? "YES" : "NO")
+      );
+
+      lines.push("");
+
+      for (const type of hevcTypes) {
+        const supported = document.createElement("video")
+          .canPlayType(type);
+
+        lines.push("canPlayType:");
+        lines.push(type);
+        lines.push("  → " + (supported || "NO"));
+        lines.push("");
+      }
+
+      if (navigator.mediaCapabilities) {
+        for (const type of hevcTypes) {
+          try {
+            const info = await navigator.mediaCapabilities.decodingInfo({
+              type: "media-source",
+              video: {
+                contentType: type,
+                width: 3840,
+                height: 2160,
+                bitrate: 20000000,
+                framerate: 24
+              }
+            });
+
+            lines.push("MediaCapabilities:");
+            lines.push(type);
+            lines.push("  supported: " + info.supported);
+            lines.push("  smooth: " + info.smooth);
+            lines.push("  powerEfficient: " + info.powerEfficient);
+            lines.push("");
+          } catch (error) {
+            lines.push("MediaCapabilities ERROR:");
+            lines.push("  " + error.message);
+            lines.push("");
+          }
+        }
+      }
+
+      const hevcSupported =
+        hevcTypes.some(type =>
+          document.createElement("video").canPlayType(type)
+        );
+
+      lines.push("================================");
+      lines.push(
+        hevcSupported
+          ? "HEVC: BROWSER HỖ TRỢ"
+          : "HEVC: BROWSER KHÔNG HỖ TRỢ"
+      );
+
+      result.textContent = lines.join("\\n");
+    }
+
+    runTest();
+  </script>
 </body>
 </html>`;
 }
 
 export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: corsHeaders(),
-      });
-    }
-
-    if (url.pathname === "/media") {
-      try {
-        return await proxyMedia(request, env);
-      } catch (error) {
-        return Response.json(
-          {
-            ok: false,
-            error: error instanceof Error
-              ? error.message
-              : String(error),
-          },
-          {
-            status: 502,
-            headers: corsHeaders(),
-          }
-        );
-      }
-    }
-
-    return new Response(playerHtml(request), {
+  async fetch(request) {
+    return new Response(testPage(), {
       headers: {
         "Content-Type": "text/html; charset=UTF-8",
-        "Cache-Control": "no-store",
-      },
+        "Cache-Control": "no-store"
+      }
     });
-  },
+  }
 };
