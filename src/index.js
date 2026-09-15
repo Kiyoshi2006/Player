@@ -1,6 +1,6 @@
 /**
  * Cloudflare Worker
- * Player + libmedia 1.3.1 + Loli Service Binding
+ * iPhone MKV player using libmedia 1.3.1.
  */
 
 const LIBMEDIA_VERSION = "1.3.1";
@@ -10,6 +10,21 @@ const SOURCE_URL =
 
 const LIBMEDIA_CDN =
   `https://cdn.jsdelivr.net/gh/zhaohappy/libmedia@${LIBMEDIA_VERSION}`;
+
+/*
+ * FFmpeg/libavcodec codec IDs.
+ *
+ * These are used instead of AVCodecID because the UMD build does not
+ * expose AVCodecID as a browser global.
+ */
+const CODEC = {
+  H264: 27,
+  HEVC: 173,
+  MP3: 86017,
+  AAC: 86018,
+  FLAC: 86028,
+  OPUS: 86076,
+};
 
 function securityHeaders() {
   return {
@@ -22,37 +37,25 @@ function securityHeaders() {
 function htmlHeaders() {
   return {
     "Content-Type": "text/html; charset=utf-8",
-    ...securityHeaders(),
     "Cache-Control": "no-store",
-  };
-}
-
-function wasmHeaders() {
-  return {
-    "Content-Type": "application/wasm",
     ...securityHeaders(),
-    "Cache-Control": "public, max-age=31536000, immutable",
   };
 }
 
 function jsHeaders() {
   return {
     "Content-Type": "application/javascript; charset=utf-8",
-    ...securityHeaders(),
     "Cache-Control": "public, max-age=31536000, immutable",
+    ...securityHeaders(),
   };
 }
 
-function responseHeaders(response, contentType) {
-  const headers = new Headers(response.headers);
-
-  if (contentType) {
-    headers.set("Content-Type", contentType);
-  }
-
-  headers.set("Cross-Origin-Resource-Policy", "same-origin");
-
-  return headers;
+function wasmHeaders() {
+  return {
+    "Content-Type": "application/wasm",
+    "Cache-Control": "public, max-age=31536000, immutable",
+    ...securityHeaders(),
+  };
 }
 
 async function proxyLibmedia(request, path) {
@@ -65,12 +68,13 @@ async function proxyLibmedia(request, path) {
     });
   }
 
-  const url = `${LIBMEDIA_CDN}/dist/umd/${cleanPath}`;
-
-  const response = await fetch(url, {
-    method: request.method,
-    headers: request.headers,
-  });
+  const response = await fetch(
+    `${LIBMEDIA_CDN}/dist/umd/${cleanPath}`,
+    {
+      method: request.method,
+      headers: request.headers,
+    },
+  );
 
   if (!response.ok) {
     return new Response(
@@ -98,25 +102,26 @@ async function proxyWasm(request, path) {
     });
   }
 
-  let cdnPath;
+  const allowedDirectories = [
+    "decode/",
+    "resample/",
+    "stretchpitch/",
+  ];
 
-  if (cleanPath.startsWith("decode/")) {
-    cdnPath = `/dist/${cleanPath}`;
-  } else if (cleanPath.startsWith("resample/")) {
-    cdnPath = `/dist/${cleanPath}`;
-  } else if (cleanPath.startsWith("stretchpitch/")) {
-    cdnPath = `/dist/${cleanPath}`;
-  } else {
-    return new Response("Invalid WASM path", {
+  if (!allowedDirectories.some((prefix) => cleanPath.startsWith(prefix))) {
+    return new Response("Invalid WASM directory", {
       status: 400,
       headers: securityHeaders(),
     });
   }
 
-  const response = await fetch(`${LIBMEDIA_CDN}${cdnPath}`, {
-    method: request.method,
-    headers: request.headers,
-  });
+  const response = await fetch(
+    `${LIBMEDIA_CDN}/dist/${cleanPath}`,
+    {
+      method: request.method,
+      headers: request.headers,
+    },
+  );
 
   if (!response.ok) {
     return new Response(
@@ -144,22 +149,28 @@ async function proxyMedia(request, env) {
     headers,
   });
 
-  const outputHeaders = responseHeaders(response);
+  const outputHeaders = new Headers(response.headers);
 
   outputHeaders.set(
     "Access-Control-Allow-Origin",
     request.headers.get("Origin") || "*",
   );
 
-  outputHeaders.set("Access-Control-Expose-Headers", [
-    "Accept-Ranges",
-    "Content-Length",
-    "Content-Range",
-    "Content-Type",
-    "ETag",
-  ].join(", "));
+  outputHeaders.set(
+    "Access-Control-Expose-Headers",
+    [
+      "Accept-Ranges",
+      "Content-Length",
+      "Content-Range",
+      "Content-Type",
+      "ETag",
+    ].join(", "),
+  );
 
-  outputHeaders.set("Cross-Origin-Resource-Policy", "cross-origin");
+  outputHeaders.set(
+    "Cross-Origin-Resource-Policy",
+    "cross-origin",
+  );
 
   return new Response(response.body, {
     status: response.status,
@@ -200,46 +211,59 @@ function playerHtml() {
 <html lang="en">
 <head>
   <meta charset="utf-8">
+
   <meta
     name="viewport"
     content="width=device-width, initial-scale=1, viewport-fit=cover"
   >
+
   <title>libmedia MKV Player</title>
 
   <style>
     html,
     body {
+      width: 100%;
+      height: 100%;
       margin: 0;
       padding: 0;
-      width: 100%;
-      min-height: 100%;
       background: #000;
       color: #fff;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      font-family:
+        system-ui,
+        -apple-system,
+        BlinkMacSystemFont,
+        sans-serif;
     }
 
     body {
-      min-height: 100vh;
+      overflow: hidden;
     }
 
     #player {
       width: 100%;
-      height: 100vh;
+      height: 100%;
       min-height: 240px;
       background: #000;
     }
 
     #status {
       position: fixed;
+      z-index: 100;
       left: 12px;
       right: 12px;
       bottom: 12px;
-      z-index: 10;
+
+      max-height: 45vh;
+      overflow: auto;
+
       padding: 10px 12px;
       border-radius: 10px;
-      background: rgba(0, 0, 0, 0.75);
+
+      background: rgba(0, 0, 0, 0.78);
       color: #fff;
+
       font-size: 13px;
+      line-height: 1.45;
       white-space: pre-wrap;
       word-break: break-word;
     }
@@ -255,43 +279,69 @@ function playerHtml() {
   <script>
     const SOURCE = "/media";
 
-    const statusElement = document.getElementById("status");
     const container = document.getElementById("player");
+    const statusElement = document.getElementById("status");
 
     function setStatus(message) {
       statusElement.textContent = message;
       console.log(message);
     }
 
-    function getCodecName(codecId) {
-      if (
-        typeof AVCodecID !== "undefined" &&
-        codecId === AVCodecID.AV_CODEC_ID_HEVC
-      ) {
-        return "HEVC";
-      }
+    function codecName(codecId) {
+      const names = {
+        27: "H.264",
+        173: "HEVC",
+        86017: "MP3",
+        86018: "AAC",
+        86028: "FLAC",
+        86076: "Opus",
+      };
 
-      if (
-        typeof AVCodecID !== "undefined" &&
-        codecId === AVCodecID.AV_CODEC_ID_OPUS
-      ) {
-        return "Opus";
-      }
+      return names[codecId] || String(codecId);
+    }
 
-      return String(codecId);
+    function wasmForCodec(codecId) {
+      switch (codecId) {
+        case 173:
+          return "/libmedia-wasm/decode/hevc-simd.wasm";
+
+        case 27:
+          return "/libmedia-wasm/decode/h264-simd.wasm";
+
+        case 86076:
+          return "/libmedia-wasm/decode/opus-simd.wasm";
+
+        case 86018:
+          return "/libmedia-wasm/decode/aac-simd.wasm";
+
+        case 86017:
+          return "/libmedia-wasm/decode/mp3-simd.wasm";
+
+        case 86028:
+          return "/libmedia-wasm/decode/flac-simd.wasm";
+
+        default:
+          return undefined;
+      }
     }
 
     async function createPlayer() {
       if (typeof AVPlayer === "undefined") {
         throw new Error(
-          "AVPlayer global is unavailable. libmedia UMD did not load correctly.",
+          "AVPlayer global is unavailable.",
         );
       }
 
       setStatus(
         "libmedia loaded\\n" +
-        "crossOriginIsolated: " + crossOriginIsolated + "\\n" +
-        "SharedArrayBuffer: " + ("SharedArrayBuffer" in window),
+        "crossOriginIsolated: " +
+        crossOriginIsolated +
+        "\\n" +
+        "SharedArrayBuffer: " +
+        ("SharedArrayBuffer" in window) +
+        "\\n" +
+        "WebCodecs: " +
+        ("VideoDecoder" in window),
       );
 
       const player = new AVPlayer({
@@ -299,28 +349,18 @@ function playerHtml() {
 
         getWasm(type, codecId, mediaType) {
           console.log(
-            "getWasm:",
-            type,
-            getCodecName(codecId),
-            mediaType,
+            "getWasm",
+            "type=" + type,
+            "codec=" + codecName(codecId),
+            "codecId=" + codecId,
+            "mediaType=" + mediaType,
           );
 
           if (type === "decoder") {
-            switch (codecId) {
-              case AVCodecID.AV_CODEC_ID_HEVC:
-                return "/libmedia-wasm/decode/hevc-simd.wasm";
+            const wasm = wasmForCodec(codecId);
 
-              case AVCodecID.AV_CODEC_ID_H264:
-                return "/libmedia-wasm/decode/h264-simd.wasm";
-
-              case AVCodecID.AV_CODEC_ID_AAC:
-                return "/libmedia-wasm/decode/aac-simd.wasm";
-
-              case AVCodecID.AV_CODEC_ID_MP3:
-                return "/libmedia-wasm/decode/mp3-simd.wasm";
-
-              case AVCodecID.AV_CODEC_ID_FLAC:
-                return "/libmedia-wasm/decode/flac-simd.wasm";
+            if (wasm) {
+              return wasm;
             }
           }
 
@@ -350,11 +390,16 @@ function playerHtml() {
     createPlayer().catch((error) => {
       console.error(error);
 
+      const message =
+        error && error.stack
+          ? error.stack
+          : error && error.message
+            ? error.message
+            : String(error);
+
       setStatus(
         "ERROR\\n\\n" +
-        (error && error.stack
-          ? error.stack
-          : String(error)),
+        message,
       );
     });
   </script>
