@@ -1,11 +1,5 @@
-/**
- * /src/index.js
- * Cloudflare Worker
- * libmedia UMD MKV player + Loli Service Binding.
- */
-
 const LIBMEDIA_VERSION = "1.3.1";
-const LIBMEDIA_DEBUG_VERSION = "umd-debug-2";
+const DEBUG_VERSION = "3";
 
 const SOURCE_URL =
   "https://loli.nvnyep.workers.dev/13102006/Colab_Torrent_Uploads/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01E01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D.mkv";
@@ -35,6 +29,7 @@ function htmlHeaders() {
 function textHeaders() {
   return {
     "Content-Type": "text/plain; charset=utf-8",
+    "Cache-Control": "no-store",
     ...securityHeaders(),
   };
 }
@@ -66,19 +61,41 @@ async function proxyJavascript(request, path) {
     /^[0-9]+\.avplayer\.js$/.test(cleanPath);
 
   if (!isMainFile && !isDynamicChunk) {
-    return invalidPath("Invalid libmedia JavaScript path");
+    return invalidPath(
+      `Invalid libmedia JavaScript path: ${cleanPath}`,
+    );
   }
 
-  const response = await fetch(
-    `${LIBMEDIA_PLAYER_CDN}/dist/umd/${cleanPath}`,
-    {
-      method: request.method,
-      headers: request.headers,
-      cf: {
-        cacheTtl: 0,
-        cacheEverything: false,
-      },
+  const cdnUrl =
+    `${LIBMEDIA_PLAYER_CDN}/dist/umd/${cleanPath}`;
+
+  console.log(
+    JSON.stringify({
+      event: "LIBMEDIA_JS_REQUEST",
+      path: cleanPath,
+      url: cdnUrl,
+    }),
+  );
+
+  const response = await fetch(cdnUrl, {
+    method: request.method,
+    headers: request.headers,
+    cf: {
+      cacheTtl: 0,
+      cacheEverything: false,
     },
+  });
+
+  console.log(
+    JSON.stringify({
+      event: "LIBMEDIA_JS_RESPONSE",
+      path: cleanPath,
+      status: response.status,
+      contentType:
+        response.headers.get("content-type"),
+      contentLength:
+        response.headers.get("content-length"),
+    }),
   );
 
   if (!response.ok) {
@@ -133,19 +150,41 @@ async function proxyWasm(request, path) {
       cleanPath.startsWith(prefix),
     )
   ) {
-    return invalidPath("Invalid WASM path");
+    return invalidPath(
+      `Invalid WASM path: ${cleanPath}`,
+    );
   }
 
-  const response = await fetch(
-    `${LIBMEDIA_ROOT_CDN}/dist/${cleanPath}`,
-    {
-      method: request.method,
-      headers: request.headers,
-      cf: {
-        cacheTtl: 0,
-        cacheEverything: false,
-      },
+  const cdnUrl =
+    `${LIBMEDIA_ROOT_CDN}/dist/${cleanPath}`;
+
+  console.log(
+    JSON.stringify({
+      event: "WASM_REQUEST",
+      path: cleanPath,
+      url: cdnUrl,
+    }),
+  );
+
+  const response = await fetch(cdnUrl, {
+    method: request.method,
+    headers: request.headers,
+    cf: {
+      cacheTtl: 0,
+      cacheEverything: false,
     },
+  });
+
+  console.log(
+    JSON.stringify({
+      event: "WASM_RESPONSE",
+      path: cleanPath,
+      status: response.status,
+      contentType:
+        response.headers.get("content-type"),
+      contentLength:
+        response.headers.get("content-length"),
+    }),
   );
 
   if (!response.ok) {
@@ -183,21 +222,66 @@ async function proxyWasm(request, path) {
 }
 
 async function proxyMedia(request, env) {
-  const headers = new Headers(request.headers);
+  const requestHeaders =
+    new Headers(request.headers);
 
-  headers.delete("host");
+  const range =
+    requestHeaders.get("range");
+
+  const accept =
+    requestHeaders.get("accept");
+
+  const contentType =
+    requestHeaders.get("content-type");
+
+  const userAgent =
+    requestHeaders.get("user-agent");
+
+  const requestDebug = {
+    event: "MEDIA_REQUEST",
+    method: request.method,
+    range: range || null,
+    accept: accept || null,
+    contentType: contentType || null,
+    userAgent: userAgent || null,
+  };
+
+  console.log(JSON.stringify(requestDebug));
+
+  requestHeaders.delete("host");
 
   const response = await env.LOLI.fetch(
     SOURCE_URL,
     {
       method: request.method,
-      headers,
+      headers: requestHeaders,
     },
   );
 
-  const outputHeaders = new Headers(
-    response.headers,
-  );
+  const responseDebug = {
+    event: "MEDIA_RESPONSE",
+    method: request.method,
+    requestRange: range || null,
+    status: response.status,
+    statusText: response.statusText,
+    contentType:
+      response.headers.get("content-type"),
+    contentLength:
+      response.headers.get("content-length"),
+    contentRange:
+      response.headers.get("content-range"),
+    acceptRanges:
+      response.headers.get("accept-ranges"),
+    contentEncoding:
+      response.headers.get("content-encoding"),
+    etag:
+      response.headers.get("etag"),
+  };
+
+  console.log(JSON.stringify(responseDebug));
+
+  const outputHeaders =
+    new Headers(response.headers);
 
   outputHeaders.set(
     "Access-Control-Allow-Origin",
@@ -230,6 +314,23 @@ async function proxyMedia(request, env) {
     "cross-origin",
   );
 
+  outputHeaders.set(
+    "X-Debug-Media-Status",
+    String(response.status),
+  );
+
+  outputHeaders.set(
+    "X-Debug-Media-Request-Range",
+    range || "none",
+  );
+
+  outputHeaders.set(
+    "X-Debug-Media-Content-Range",
+    response.headers.get(
+      "content-range",
+    ) || "none",
+  );
+
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -238,29 +339,57 @@ async function proxyMedia(request, env) {
 }
 
 async function checkLoli(env) {
-  const response = await env.LOLI.fetch(
-    SOURCE_URL,
-    {
-      method: "GET",
-      headers: {
-        Range: "bytes=0-1023",
-      },
-    },
-  );
+  const ranges = [
+    "bytes=0-1023",
+    "bytes=1024-2047",
+    "bytes=0-65535",
+  ];
+
+  const results = [];
+
+  for (const range of ranges) {
+    const response =
+      await env.LOLI.fetch(
+        SOURCE_URL,
+        {
+          method: "GET",
+          headers: {
+            Range: range,
+          },
+        },
+      );
+
+    results.push({
+      requestedRange: range,
+      status: response.status,
+      statusText:
+        response.statusText,
+      contentType:
+        response.headers.get(
+          "content-type",
+        ),
+      contentLength:
+        response.headers.get(
+          "content-length",
+        ),
+      contentRange:
+        response.headers.get(
+          "content-range",
+        ),
+      acceptRanges:
+        response.headers.get(
+          "accept-ranges",
+        ),
+    });
+  }
 
   return Response.json(
     {
-      ok: response.ok,
-      status: response.status,
-      statusText: response.statusText,
-      contentType:
-        response.headers.get("content-type"),
-      contentLength:
-        response.headers.get("content-length"),
-      contentRange:
-        response.headers.get("content-range"),
-      acceptRanges:
-        response.headers.get("accept-ranges"),
+      ok: results.every(
+        (item) => item.status === 206,
+      ),
+      source: SOURCE_URL,
+      results,
     },
     {
       headers: {
@@ -282,7 +411,7 @@ function playerHtml() {
     content="width=device-width, initial-scale=1, viewport-fit=cover"
   >
 
-  <title>libmedia MKV Player</title>
+  <title>libmedia MKV Debug Player</title>
 
   <style>
     html,
@@ -313,18 +442,18 @@ function playerHtml() {
 
     #status {
       position: fixed;
-      z-index: 100;
-      left: 12px;
-      right: 12px;
-      bottom: 12px;
-      max-height: 55vh;
+      z-index: 1000;
+      left: 8px;
+      right: 8px;
+      bottom: 8px;
+      max-height: 65vh;
       overflow: auto;
       box-sizing: border-box;
       padding: 12px;
       border-radius: 10px;
-      background: rgba(0, 0, 0, 0.88);
+      background: rgba(0, 0, 0, 0.92);
       color: #fff;
-      font-size: 13px;
+      font-size: 12px;
       line-height: 1.45;
       white-space: pre-wrap;
       word-break: break-word;
@@ -341,7 +470,7 @@ function playerHtml() {
 
 <body>
   <div id="player"></div>
-  <div id="status">Initializing...</div>
+  <div id="status">Starting...</div>
 
   <script>
     const statusElement =
@@ -350,21 +479,41 @@ function playerHtml() {
     const container =
       document.getElementById("player");
 
-    function setStatus(message) {
-      statusElement.textContent = message;
+    const debugLines = [];
+
+    function log(message) {
+      const line =
+        "[" +
+        new Date().toISOString().slice(11, 23) +
+        "] " +
+        message;
+
+      debugLines.push(line);
+
+      if (debugLines.length > 80) {
+        debugLines.shift();
+      }
+
+      statusElement.textContent =
+        debugLines.join("\\n");
+
+      console.log(line);
     }
 
-    function formatError(error) {
+    function errorText(error) {
       if (!error) {
         return "Unknown error";
       }
 
       if (error instanceof Error) {
         return [
-          "name: " + (error.name || "Error"),
-          "message: " + (error.message || ""),
+          "name: " +
+            (error.name || "Error"),
+          "message: " +
+            (error.message || ""),
           error.stack
-            ? "\\nstack:\\n" + error.stack
+            ? "\\nstack:\\n" +
+              error.stack
             : "",
         ].join("\\n");
       }
@@ -375,30 +524,16 @@ function playerHtml() {
     window.addEventListener(
       "error",
       function (event) {
-        const target = event.target;
-
-        if (
-          target &&
-          target.tagName === "SCRIPT"
-        ) {
-          setStatus(
-            "LIBMEDIA SCRIPT LOAD ERROR\\n\\n" +
-            "src: " +
-            target.src,
-          );
-          return;
-        }
-
         if (event.error) {
-          setStatus(
-            "LIBMEDIA RUNTIME ERROR\\n\\n" +
-            formatError(event.error),
+          log(
+            "WINDOW ERROR\\n" +
+            errorText(event.error),
           );
           return;
         }
 
-        setStatus(
-          "BROWSER ERROR\\n\\n" +
+        log(
+          "BROWSER ERROR\\n" +
           "message: " +
           event.message +
           "\\nfile: " +
@@ -415,153 +550,240 @@ function playerHtml() {
     window.addEventListener(
       "unhandledrejection",
       function (event) {
-        setStatus(
-          "UNHANDLED PROMISE ERROR\\n\\n" +
-          formatError(event.reason),
+        log(
+          "UNHANDLED REJECTION\\n" +
+          errorText(event.reason),
         );
       },
     );
 
+    async function loadLibmedia() {
+      log(
+        "Loading libmedia UMD " +
+        "${LIBMEDIA_VERSION}" +
+        "...",
+      );
+
+      const script =
+        document.createElement("script");
+
+      script.src =
+        "/libmedia/avplayer.js?v=${DEBUG_VERSION}";
+
+      script.async = false;
+
+      script.onload = function () {
+        log(
+          "avplayer.js onload",
+        );
+
+        log(
+          "typeof window.AVPlayer = " +
+          typeof window.AVPlayer,
+        );
+      };
+
+      script.onerror = function () {
+        log(
+          "SCRIPT LOAD ERROR\\n" +
+          script.src,
+        );
+      };
+
+      document.head.appendChild(script);
+
+      await new Promise(
+        function (resolve, reject) {
+          script.addEventListener(
+            "load",
+            resolve,
+            { once: true },
+          );
+
+          script.addEventListener(
+            "error",
+            function () {
+              reject(
+                new Error(
+                  "Failed to load avplayer.js",
+                ),
+              );
+            },
+            { once: true },
+          );
+        },
+      );
+    }
+
     async function createPlayer() {
-      setStatus(
-        "Checking libmedia...\\n\\n" +
-        "crossOriginIsolated: " +
-        window.crossOriginIsolated +
-        "\\n" +
-        "SharedArrayBuffer: " +
-        ("SharedArrayBuffer" in window) +
-        "\\n" +
-        "VideoDecoder: " +
-        ("VideoDecoder" in window) +
-        "\\n" +
-        "AVPlayer: " +
+      log(
+        "crossOriginIsolated = " +
+        window.crossOriginIsolated,
+      );
+
+      log(
+        "SharedArrayBuffer = " +
+        ("SharedArrayBuffer" in window),
+      );
+
+      log(
+        "VideoDecoder = " +
+        ("VideoDecoder" in window),
+      );
+
+      log(
+        "AVPlayer = " +
         typeof window.AVPlayer,
       );
 
-      if (typeof window.AVPlayer !== "function") {
+      if (
+        typeof window.AVPlayer !==
+        "function"
+      ) {
         throw new Error(
-          "UMD script loaded, but window.AVPlayer is unavailable.",
+          "window.AVPlayer was not exported by UMD.",
         );
       }
 
-      setStatus(
-        "AVPlayer loaded successfully.\\n\\n" +
-        "Creating player...",
+      log(
+        "Creating AVPlayer...",
       );
 
-      const player = new window.AVPlayer({
-        container,
+      const player =
+        new window.AVPlayer({
+          container,
 
-        getWasm(type, codecId, mediaType) {
-          if (type === "decoder") {
-            if (codecId === 173) {
-              return "/libmedia-wasm/decode/hevc-simd.wasm";
+          getWasm(
+            type,
+            codecId,
+            mediaType,
+          ) {
+            log(
+              "getWasm type=" +
+              type +
+              " codecId=" +
+              codecId +
+              " mediaType=" +
+              mediaType,
+            );
+
+            if (type === "decoder") {
+              if (codecId === 173) {
+                log(
+                  "HEVC WASM requested",
+                );
+
+                return (
+                  "/libmedia-wasm/decode/hevc-simd.wasm"
+                );
+              }
+
+              if (codecId === 86076) {
+                log(
+                  "Opus WASM requested",
+                );
+
+                return (
+                  "/libmedia-wasm/decode/opus-simd.wasm"
+                );
+              }
+
+              if (codecId === 86018) {
+                return (
+                  "/libmedia-wasm/decode/aac-simd.wasm"
+                );
+              }
+
+              if (codecId === 86017) {
+                return (
+                  "/libmedia-wasm/decode/mp3-simd.wasm"
+                );
+              }
+
+              if (codecId === 86028) {
+                return (
+                  "/libmedia-wasm/decode/flac-simd.wasm"
+                );
+              }
+
+              if (codecId === 27) {
+                return (
+                  "/libmedia-wasm/decode/h264-simd.wasm"
+                );
+              }
+
+              log(
+                "No WASM mapping for codecId=" +
+                codecId,
+              );
+
+              return undefined;
             }
 
-            if (codecId === 86076) {
-              return "/libmedia-wasm/decode/opus-simd.wasm";
+            if (type === "resampler") {
+              log(
+                "Resampler WASM requested",
+              );
+
+              return (
+                "/libmedia-wasm/resample/resample-simd.wasm"
+              );
             }
 
-            if (codecId === 86018) {
-              return "/libmedia-wasm/decode/aac-simd.wasm";
-            }
+            if (
+              type === "stretchpitcher"
+            ) {
+              log(
+                "StretchPitch WASM requested",
+              );
 
-            if (codecId === 86017) {
-              return "/libmedia-wasm/decode/mp3-simd.wasm";
-            }
-
-            if (codecId === 86028) {
-              return "/libmedia-wasm/decode/flac-simd.wasm";
-            }
-
-            if (codecId === 27) {
-              return "/libmedia-wasm/decode/h264-simd.wasm";
+              return (
+                "/libmedia-wasm/stretchpitch/stretchpitch-simd.wasm"
+              );
             }
 
             return undefined;
-          }
+          },
+        });
 
-          if (type === "resampler") {
-            return "/libmedia-wasm/resample/resample-simd.wasm";
-          }
+      log(
+        "AVPlayer constructor completed.",
+      );
 
-          if (type === "stretchpitcher") {
-            return "/libmedia-wasm/stretchpitch/stretchpitch-simd.wasm";
-          }
-
-          return undefined;
-        },
-      });
-
-      setStatus(
-        "AVPlayer created.\\n\\n" +
-        "Loading MKV...",
+      log(
+        "Calling player.load('/media')...",
       );
 
       await player.load("/media");
 
-      setStatus(
-        "MKV loaded.\\n\\n" +
-        "Starting playback...",
+      log(
+        "player.load('/media') completed.",
+      );
+
+      log(
+        "Calling player.play()...",
       );
 
       await player.play();
 
-      setStatus("PLAYING");
-    }
-
-    function loadLibmedia() {
-      return new Promise(function (resolve, reject) {
-        const script =
-          document.createElement("script");
-
-        script.src =
-          "/libmedia/avplayer.js?v=${LIBMEDIA_DEBUG_VERSION}";
-
-        script.async = false;
-
-        script.onload = function () {
-          resolve();
-        };
-
-        script.onerror = function () {
-          reject(
-            new Error(
-              "Browser failed to load /libmedia/avplayer.js",
-            ),
-          );
-        };
-
-        document.head.appendChild(script);
-      });
+      log(
+        "PLAYING",
+      );
     }
 
     async function boot() {
       try {
-        setStatus(
-          "Loading libmedia UMD...\\n\\n" +
-          "Version: ${LIBMEDIA_VERSION}\\n" +
-          "Mode: UMD\\n" +
-          "Cache: disabled",
-        );
-
         await loadLibmedia();
 
-        if (
-          typeof window.AVPlayer !== "function"
-        ) {
-          throw new Error(
-            "libmedia script finished loading, but window.AVPlayer was not exported.",
-          );
-        }
+        log(
+          "libmedia script loaded.",
+        );
 
         await createPlayer();
       } catch (error) {
-        console.error(error);
-
-        setStatus(
-          "ERROR\\n\\n" +
-          formatError(error),
+        log(
+          "FATAL ERROR\\n\\n" +
+          errorText(error),
         );
       }
     }
@@ -591,9 +813,12 @@ export default {
       }
 
       if (url.pathname === "/") {
-        return new Response(playerHtml(), {
-          headers: htmlHeaders(),
-        });
+        return new Response(
+          playerHtml(),
+          {
+            headers: htmlHeaders(),
+          },
+        );
       }
 
       if (url.pathname === "/api/check") {
@@ -630,10 +855,13 @@ export default {
         );
       }
 
-      return new Response("Not Found", {
-        status: 404,
-        headers: securityHeaders(),
-      });
+      return new Response(
+        "Not Found",
+        {
+          status: 404,
+          headers: securityHeaders(),
+        },
+      );
     } catch (error) {
       console.error(error);
 
@@ -643,11 +871,7 @@ export default {
           : String(error),
         {
           status: 500,
-          headers: {
-            "Content-Type":
-              "text/plain; charset=utf-8",
-            ...securityHeaders(),
-          },
+          headers: textHeaders(),
         },
       );
     }
