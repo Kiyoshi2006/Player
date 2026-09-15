@@ -1,9 +1,11 @@
 /**
+ * /src/index.js
  * Cloudflare Worker
  * libmedia UMD MKV player + Loli Service Binding.
  */
 
 const LIBMEDIA_VERSION = "1.3.1";
+const LIBMEDIA_DEBUG_VERSION = "umd-debug-2";
 
 const SOURCE_URL =
   "https://loli.nvnyep.workers.dev/13102006/Colab_Torrent_Uploads/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01E01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D.mkv";
@@ -30,23 +32,24 @@ function htmlHeaders() {
   };
 }
 
+function textHeaders() {
+  return {
+    "Content-Type": "text/plain; charset=utf-8",
+    ...securityHeaders(),
+  };
+}
+
 function invalidPath(message) {
   return new Response(message, {
     status: 400,
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      ...securityHeaders(),
-    },
+    headers: textHeaders(),
   });
 }
 
 function errorResponse(message, status) {
   return new Response(message, {
     status,
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      ...securityHeaders(),
-    },
+    headers: textHeaders(),
   });
 }
 
@@ -57,8 +60,7 @@ async function proxyJavascript(request, path) {
     return invalidPath("Invalid libmedia path");
   }
 
-  const isMainFile =
-    cleanPath === "avplayer.js";
+  const isMainFile = cleanPath === "avplayer.js";
 
   const isDynamicChunk =
     /^[0-9]+\.avplayer\.js$/.test(cleanPath);
@@ -72,6 +74,10 @@ async function proxyJavascript(request, path) {
     {
       method: request.method,
       headers: request.headers,
+      cf: {
+        cacheTtl: 0,
+        cacheEverything: false,
+      },
     },
   );
 
@@ -91,13 +97,16 @@ async function proxyJavascript(request, path) {
 
   headers.set(
     "Cache-Control",
-    "public, max-age=31536000, immutable",
+    "no-store",
   );
 
   headers.set(
     "Cross-Origin-Resource-Policy",
     "same-origin",
   );
+
+  headers.delete("Content-Length");
+  headers.delete("ETag");
 
   return new Response(response.body, {
     status: response.status,
@@ -132,6 +141,10 @@ async function proxyWasm(request, path) {
     {
       method: request.method,
       headers: request.headers,
+      cf: {
+        cacheTtl: 0,
+        cacheEverything: false,
+      },
     },
   );
 
@@ -151,13 +164,16 @@ async function proxyWasm(request, path) {
 
   headers.set(
     "Cache-Control",
-    "public, max-age=31536000, immutable",
+    "no-store",
   );
 
   headers.set(
     "Cross-Origin-Resource-Policy",
     "same-origin",
   );
+
+  headers.delete("Content-Length");
+  headers.delete("ETag");
 
   return new Response(response.body, {
     status: response.status,
@@ -301,25 +317,31 @@ function playerHtml() {
       left: 12px;
       right: 12px;
       bottom: 12px;
-      max-height: 50vh;
+      max-height: 55vh;
       overflow: auto;
-      padding: 10px 12px;
+      box-sizing: border-box;
+      padding: 12px;
       border-radius: 10px;
-      background: rgba(0, 0, 0, 0.8);
+      background: rgba(0, 0, 0, 0.88);
       color: #fff;
       font-size: 13px;
       line-height: 1.45;
       white-space: pre-wrap;
       word-break: break-word;
+      font-family:
+        ui-monospace,
+        SFMono-Regular,
+        Menlo,
+        Monaco,
+        Consolas,
+        monospace;
     }
   </style>
 </head>
 
 <body>
   <div id="player"></div>
-  <div id="status">Loading libmedia...</div>
-
-  <script src="/libmedia/avplayer.js"></script>
+  <div id="status">Initializing...</div>
 
   <script>
     const statusElement =
@@ -330,52 +352,100 @@ function playerHtml() {
 
     function setStatus(message) {
       statusElement.textContent = message;
-      console.log(message);
     }
 
-    function describeError(error) {
+    function formatError(error) {
       if (!error) {
         return "Unknown error";
       }
 
-      const parts = [];
-
-      if (error.name) {
-        parts.push("name: " + error.name);
+      if (error instanceof Error) {
+        return [
+          "name: " + (error.name || "Error"),
+          "message: " + (error.message || ""),
+          error.stack
+            ? "\\nstack:\\n" + error.stack
+            : "",
+        ].join("\\n");
       }
 
-      if (error.message) {
-        parts.push("message: " + error.message);
-      }
-
-      if (error.stack) {
-        parts.push("\\nstack:\\n" + error.stack);
-      }
-
-      return parts.join("\\n");
+      return String(error);
     }
+
+    window.addEventListener(
+      "error",
+      function (event) {
+        const target = event.target;
+
+        if (
+          target &&
+          target.tagName === "SCRIPT"
+        ) {
+          setStatus(
+            "LIBMEDIA SCRIPT LOAD ERROR\\n\\n" +
+            "src: " +
+            target.src,
+          );
+          return;
+        }
+
+        if (event.error) {
+          setStatus(
+            "LIBMEDIA RUNTIME ERROR\\n\\n" +
+            formatError(event.error),
+          );
+          return;
+        }
+
+        setStatus(
+          "BROWSER ERROR\\n\\n" +
+          "message: " +
+          event.message +
+          "\\nfile: " +
+          event.filename +
+          "\\nline: " +
+          event.lineno +
+          "\\ncolumn: " +
+          event.colno,
+        );
+      },
+      true,
+    );
+
+    window.addEventListener(
+      "unhandledrejection",
+      function (event) {
+        setStatus(
+          "UNHANDLED PROMISE ERROR\\n\\n" +
+          formatError(event.reason),
+        );
+      },
+    );
 
     async function createPlayer() {
       setStatus(
-        "Checking libmedia...\\n" +
+        "Checking libmedia...\\n\\n" +
         "crossOriginIsolated: " +
-        window.crossOriginIsolated + "\\n" +
+        window.crossOriginIsolated +
+        "\\n" +
         "SharedArrayBuffer: " +
-        ("SharedArrayBuffer" in window) + "\\n" +
+        ("SharedArrayBuffer" in window) +
+        "\\n" +
         "VideoDecoder: " +
-        ("VideoDecoder" in window) + "\\n" +
+        ("VideoDecoder" in window) +
+        "\\n" +
         "AVPlayer: " +
         typeof window.AVPlayer,
       );
 
       if (typeof window.AVPlayer !== "function") {
         throw new Error(
-          "window.AVPlayer is unavailable.",
+          "UMD script loaded, but window.AVPlayer is unavailable.",
         );
       }
 
       setStatus(
-        "AVPlayer loaded successfully.\\n" +
+        "AVPlayer loaded successfully.\\n\\n" +
         "Creating player...",
       );
 
@@ -383,13 +453,6 @@ function playerHtml() {
         container,
 
         getWasm(type, codecId, mediaType) {
-          console.log(
-            "getWasm:",
-            type,
-            codecId,
-            mediaType,
-          );
-
           if (type === "decoder") {
             if (codecId === 173) {
               return "/libmedia-wasm/decode/hevc-simd.wasm";
@@ -431,14 +494,14 @@ function playerHtml() {
       });
 
       setStatus(
-        "AVPlayer created.\\n" +
+        "AVPlayer created.\\n\\n" +
         "Loading MKV...",
       );
 
       await player.load("/media");
 
       setStatus(
-        "MKV loaded.\\n" +
+        "MKV loaded.\\n\\n" +
         "Starting playback...",
       );
 
@@ -447,14 +510,63 @@ function playerHtml() {
       setStatus("PLAYING");
     }
 
-    createPlayer().catch((error) => {
-      console.error(error);
+    function loadLibmedia() {
+      return new Promise(function (resolve, reject) {
+        const script =
+          document.createElement("script");
 
-      setStatus(
-        "ERROR\\n\\n" +
-        describeError(error),
-      );
-    });
+        script.src =
+          "/libmedia/avplayer.js?v=${LIBMEDIA_DEBUG_VERSION}";
+
+        script.async = false;
+
+        script.onload = function () {
+          resolve();
+        };
+
+        script.onerror = function () {
+          reject(
+            new Error(
+              "Browser failed to load /libmedia/avplayer.js",
+            ),
+          );
+        };
+
+        document.head.appendChild(script);
+      });
+    }
+
+    async function boot() {
+      try {
+        setStatus(
+          "Loading libmedia UMD...\\n\\n" +
+          "Version: ${LIBMEDIA_VERSION}\\n" +
+          "Mode: UMD\\n" +
+          "Cache: disabled",
+        );
+
+        await loadLibmedia();
+
+        if (
+          typeof window.AVPlayer !== "function"
+        ) {
+          throw new Error(
+            "libmedia script finished loading, but window.AVPlayer was not exported.",
+          );
+        }
+
+        await createPlayer();
+      } catch (error) {
+        console.error(error);
+
+        setStatus(
+          "ERROR\\n\\n" +
+          formatError(error),
+        );
+      }
+    }
+
+    boot();
   </script>
 </body>
 </html>`;
