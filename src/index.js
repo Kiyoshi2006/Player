@@ -1,137 +1,182 @@
-function testPage() {
+const TEST_VIDEO =
+  "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_adv_example_hevc/v10/main.mp4";
+
+function page() {
   return `<!doctype html>
 <html lang="vi">
 <head>
   <meta charset="utf-8">
   <meta
     name="viewport"
-    content="width=device-width, initial-scale=1, viewport-fit=cover"
+    content="width=device-width,initial-scale=1,viewport-fit=cover"
   >
-  <title>HEVC Hardware Test</title>
+  <title>Native HEVC Test</title>
+
   <style>
+    html,
     body {
       margin: 0;
-      padding: 24px;
-      background: #111;
+      padding: 0;
+      background: #000;
       color: #fff;
       font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     }
 
-    h1 {
-      font-size: 22px;
+    body {
+      padding: 16px;
+      box-sizing: border-box;
+    }
+
+    video {
+      display: block;
+      width: 100%;
+      max-height: 60vh;
+      background: #000;
     }
 
     pre {
+      margin-top: 16px;
+      padding: 14px;
+      border-radius: 12px;
+      background: #181818;
       white-space: pre-wrap;
       word-break: break-word;
-      background: #222;
-      padding: 16px;
-      border-radius: 12px;
-      line-height: 1.6;
-    }
-
-    .ok {
-      color: #4ade80;
-    }
-
-    .warn {
-      color: #facc15;
-    }
-
-    .bad {
-      color: #f87171;
+      line-height: 1.5;
+      font-size: 14px;
     }
   </style>
 </head>
+
 <body>
-  <h1>iPhone HEVC Hardware Decode Test</h1>
-  <pre id="result">Đang kiểm tra...</pre>
+  <video
+    id="video"
+    controls
+    playsinline
+    preload="auto"
+  ></video>
+
+  <pre id="info">Đang kiểm tra...</pre>
 
   <script>
-    async function runTest() {
-      const result = document.getElementById("result");
-      const lines = [];
+    const video = document.getElementById("video");
+    const info = document.getElementById("info");
 
-      const hevcTypes = [
-        "video/mp4; codecs=\\"hvc1.1.6.L123.B0\\"",
-        "video/mp4; codecs=\\"hev1.1.6.L123.B0\\"",
-        "video/mp4; codecs=\\"hvc1.2.4.L153.B0\\""
-      ];
+    const codec = 'video/mp4; codecs="hvc1"';
 
-      lines.push(
-        "Safari: " +
-        (/Safari/i.test(navigator.userAgent) ? "YES" : "NO")
-      );
+    const canPlay = video.canPlayType(codec);
 
-      lines.push(
-        "MediaCapabilities: " +
-        (navigator.mediaCapabilities ? "YES" : "NO")
-      );
+    let capability = null;
 
-      lines.push("");
-
-      for (const type of hevcTypes) {
-        const supported = document.createElement("video")
-          .canPlayType(type);
-
-        lines.push("canPlayType:");
-        lines.push(type);
-        lines.push("  → " + (supported || "NO"));
-        lines.push("");
+    async function checkCapability() {
+      if (!navigator.mediaCapabilities) {
+        return null;
       }
 
-      if (navigator.mediaCapabilities) {
-        for (const type of hevcTypes) {
-          try {
-            const info = await navigator.mediaCapabilities.decodingInfo({
-              type: "media-source",
-              video: {
-                contentType: type,
-                width: 3840,
-                height: 2160,
-                bitrate: 20000000,
-                framerate: 24
-              }
-            });
-
-            lines.push("MediaCapabilities:");
-            lines.push(type);
-            lines.push("  supported: " + info.supported);
-            lines.push("  smooth: " + info.smooth);
-            lines.push("  powerEfficient: " + info.powerEfficient);
-            lines.push("");
-          } catch (error) {
-            lines.push("MediaCapabilities ERROR:");
-            lines.push("  " + error.message);
-            lines.push("");
+      try {
+        return await navigator.mediaCapabilities.decodingInfo({
+          type: "file",
+          video: {
+            contentType: codec,
+            width: 1920,
+            height: 1080,
+            bitrate: 12000000,
+            framerate: 30
           }
+        });
+      } catch (error) {
+        return {
+          error: error instanceof Error
+            ? error.message
+            : String(error)
+        };
+      }
+    }
+
+    function updateInfo() {
+      const lines = [
+        "Native Safari HEVC",
+        "====================",
+        "",
+        "canPlayType: " + (canPlay || "NO"),
+        "readyState: " + video.readyState,
+        "networkState: " + video.networkState,
+        "paused: " + video.paused,
+        "currentTime: " + video.currentTime.toFixed(2),
+        "videoWidth: " + video.videoWidth,
+        "videoHeight: " + video.videoHeight
+      ];
+
+      if (capability) {
+        lines.push("");
+        lines.push("MediaCapabilities:");
+        lines.push(
+          "supported: " +
+          (capability.supported ?? "unknown")
+        );
+        lines.push(
+          "smooth: " +
+          (capability.smooth ?? "unknown")
+        );
+        lines.push(
+          "powerEfficient: " +
+          (capability.powerEfficient ?? "unknown")
+        );
+
+        if (capability.error) {
+          lines.push("error: " + capability.error);
         }
       }
 
-      const hevcSupported =
-        hevcTypes.some(type =>
-          document.createElement("video").canPlayType(type)
+      if (video.getVideoPlaybackQuality) {
+        const quality = video.getVideoPlaybackQuality();
+
+        lines.push("");
+        lines.push("Playback:");
+        lines.push(
+          "totalFrames: " +
+          quality.totalVideoFrames
         );
+        lines.push(
+          "droppedFrames: " +
+          quality.droppedVideoFrames
+        );
+      }
 
-      lines.push("================================");
-      lines.push(
-        hevcSupported
-          ? "HEVC: BROWSER HỖ TRỢ"
-          : "HEVC: BROWSER KHÔNG HỖ TRỢ"
-      );
-
-      result.textContent = lines.join("\\n");
+      info.textContent = lines.join("\\n");
     }
 
-    runTest();
+    async function start() {
+      capability = await checkCapability();
+
+      video.src = "${TEST_VIDEO}";
+      video.load();
+
+      updateInfo();
+
+      setInterval(updateInfo, 1000);
+    }
+
+    [
+      "loadedmetadata",
+      "canplay",
+      "playing",
+      "pause",
+      "waiting",
+      "stalled",
+      "error"
+    ].forEach(eventName => {
+      video.addEventListener(eventName, updateInfo);
+    });
+
+    start();
   </script>
 </body>
 </html>`;
 }
 
 export default {
-  async fetch(request) {
-    return new Response(testPage(), {
+  async fetch() {
+    return new Response(page(), {
       headers: {
         "Content-Type": "text/html; charset=UTF-8",
         "Cache-Control": "no-store"
