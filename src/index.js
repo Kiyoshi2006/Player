@@ -1,101 +1,221 @@
-// src/index.js
+/**
+ * Cloudflare Worker
+ * Player + libmedia 1.3.1 + Loli Service Binding
+ */
+
+const LIBMEDIA_VERSION = "1.3.1";
 
 const SOURCE_URL =
   "https://loli.nvnyep.workers.dev/13102006/Colab_Torrent_Uploads/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D/%5BFeibanyama%5D%20Mushoku%20Tensei%20Jobless%20Reincarnation%20S01E01%20%5BBILIBILI%20WebRip%202160p%20HEVC%20OPUS%20Multi-Subs%5D.mkv";
 
-const SAFARI_UA =
-  "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) " +
-  "AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1";
+const LIBMEDIA_CDN =
+  `https://cdn.jsdelivr.net/gh/zhaohappy/libmedia@${LIBMEDIA_VERSION}`;
 
-function corsHeaders(headers = {}) {
-  const result = new Headers(headers);
-
-  result.set("Access-Control-Allow-Origin", "*");
-  result.set(
-    "Access-Control-Allow-Headers",
-    "Range, Content-Type, Accept, Origin, User-Agent"
-  );
-  result.set(
-    "Access-Control-Allow-Methods",
-    "GET, HEAD, OPTIONS"
-  );
-  result.set(
-    "Access-Control-Expose-Headers",
-    [
-      "Accept-Ranges",
-      "Content-Length",
-      "Content-Range",
-      "Content-Type",
-      "X-Cache",
-    ].join(", ")
-  );
-
-  return result;
-}
-
-function pageHeaders() {
+function securityHeaders() {
   return {
-    "Content-Type": "text/html; charset=utf-8",
-    "Cache-Control": "no-store",
-
-    // Required for SharedArrayBuffer / libmedia
     "Cross-Origin-Opener-Policy": "same-origin",
     "Cross-Origin-Embedder-Policy": "require-corp",
+    "Cross-Origin-Resource-Policy": "same-origin",
   };
 }
 
-async function sourceRequest(env, request) {
-  const headers = new Headers();
+function htmlHeaders() {
+  return {
+    "Content-Type": "text/html; charset=utf-8",
+    ...securityHeaders(),
+    "Cache-Control": "no-store",
+  };
+}
 
-  const range = request.headers.get("Range");
+function wasmHeaders() {
+  return {
+    "Content-Type": "application/wasm",
+    ...securityHeaders(),
+    "Cache-Control": "public, max-age=31536000, immutable",
+  };
+}
 
-  if (range) {
-    headers.set("Range", range);
+function jsHeaders() {
+  return {
+    "Content-Type": "application/javascript; charset=utf-8",
+    ...securityHeaders(),
+    "Cache-Control": "public, max-age=31536000, immutable",
+  };
+}
+
+function responseHeaders(response, contentType) {
+  const headers = new Headers(response.headers);
+
+  if (contentType) {
+    headers.set("Content-Type", contentType);
   }
 
-  headers.set("User-Agent", SAFARI_UA);
+  headers.set("Cross-Origin-Resource-Policy", "same-origin");
 
-  return env.LOLI.fetch(
-    new Request(SOURCE_URL, {
-      method: request.method,
-      headers,
-    })
+  return headers;
+}
+
+async function proxyLibmedia(request, path) {
+  const cleanPath = path.replace(/^\/+/, "");
+
+  if (!cleanPath || cleanPath.includes("..")) {
+    return new Response("Invalid libmedia path", {
+      status: 400,
+      headers: securityHeaders(),
+    });
+  }
+
+  const url = `${LIBMEDIA_CDN}/dist/umd/${cleanPath}`;
+
+  const response = await fetch(url, {
+    method: request.method,
+    headers: request.headers,
+  });
+
+  if (!response.ok) {
+    return new Response(
+      `libmedia CDN error: ${response.status} ${response.statusText}`,
+      {
+        status: response.status,
+        headers: securityHeaders(),
+      },
+    );
+  }
+
+  return new Response(response.body, {
+    status: response.status,
+    headers: jsHeaders(),
+  });
+}
+
+async function proxyWasm(request, path) {
+  const cleanPath = path.replace(/^\/+/, "");
+
+  if (!cleanPath || cleanPath.includes("..")) {
+    return new Response("Invalid WASM path", {
+      status: 400,
+      headers: securityHeaders(),
+    });
+  }
+
+  let cdnPath;
+
+  if (cleanPath.startsWith("decode/")) {
+    cdnPath = `/dist/${cleanPath}`;
+  } else if (cleanPath.startsWith("resample/")) {
+    cdnPath = `/dist/${cleanPath}`;
+  } else if (cleanPath.startsWith("stretchpitch/")) {
+    cdnPath = `/dist/${cleanPath}`;
+  } else {
+    return new Response("Invalid WASM path", {
+      status: 400,
+      headers: securityHeaders(),
+    });
+  }
+
+  const response = await fetch(`${LIBMEDIA_CDN}${cdnPath}`, {
+    method: request.method,
+    headers: request.headers,
+  });
+
+  if (!response.ok) {
+    return new Response(
+      `WASM CDN error: ${response.status} ${response.statusText}`,
+      {
+        status: response.status,
+        headers: securityHeaders(),
+      },
+    );
+  }
+
+  return new Response(response.body, {
+    status: response.status,
+    headers: wasmHeaders(),
+  });
+}
+
+async function proxyMedia(request, env) {
+  const headers = new Headers(request.headers);
+
+  headers.delete("host");
+
+  const response = await env.LOLI.fetch(SOURCE_URL, {
+    method: request.method,
+    headers,
+  });
+
+  const outputHeaders = responseHeaders(response);
+
+  outputHeaders.set(
+    "Access-Control-Allow-Origin",
+    request.headers.get("Origin") || "*",
+  );
+
+  outputHeaders.set("Access-Control-Expose-Headers", [
+    "Accept-Ranges",
+    "Content-Length",
+    "Content-Range",
+    "Content-Type",
+    "ETag",
+  ].join(", "));
+
+  outputHeaders.set("Cross-Origin-Resource-Policy", "cross-origin");
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: outputHeaders,
+  });
+}
+
+async function checkLoli(env) {
+  const response = await env.LOLI.fetch(SOURCE_URL, {
+    method: "GET",
+    headers: {
+      Range: "bytes=0-1023",
+    },
+  });
+
+  return Response.json(
+    {
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      contentType: response.headers.get("content-type"),
+      contentLength: response.headers.get("content-length"),
+      contentRange: response.headers.get("content-range"),
+      acceptRanges: response.headers.get("accept-ranges"),
+    },
+    {
+      headers: {
+        ...securityHeaders(),
+        "Cache-Control": "no-store",
+      },
+    },
   );
 }
 
-function playerPage() {
+function playerHtml() {
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-
   <meta
     name="viewport"
-    content="width=device-width,
-    initial-scale=1,
-    viewport-fit=cover"
+    content="width=device-width, initial-scale=1, viewport-fit=cover"
   >
-
-  <title>libmedia MKV Test</title>
+  <title>libmedia MKV Player</title>
 
   <style>
-    :root {
-      color-scheme: dark;
-    }
-
     html,
     body {
       margin: 0;
+      padding: 0;
       width: 100%;
       min-height: 100%;
       background: #000;
       color: #fff;
-      font-family:
-        system-ui,
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
-        sans-serif;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
     }
 
     body {
@@ -104,402 +224,208 @@ function playerPage() {
 
     #player {
       width: 100%;
-      height: 70vh;
+      height: 100vh;
       min-height: 240px;
       background: #000;
     }
 
-    #info {
-      padding: 12px;
+    #status {
+      position: fixed;
+      left: 12px;
+      right: 12px;
+      bottom: 12px;
+      z-index: 10;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(0, 0, 0, 0.75);
+      color: #fff;
       font-size: 13px;
-      line-height: 1.5;
       white-space: pre-wrap;
-      overflow-wrap: anywhere;
-    }
-
-    #video {
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-      background: #000;
-    }
-
-    .ok {
-      color: #7cff9b;
-    }
-
-    .bad {
-      color: #ff7474;
+      word-break: break-word;
     }
   </style>
 </head>
 
 <body>
+  <div id="player"></div>
+  <div id="status">Loading libmedia...</div>
 
-<div id="player"></div>
+  <script src="/libmedia/avplayer.js"></script>
 
-<pre id="info">Loading libmedia…</pre>
+  <script>
+    const SOURCE = "/media";
 
-<script
-  src="https://cdn.jsdelivr.net/gh/zhaohappy/libmedia@latest/dist/umd/avplayer.js">
-</script>
+    const statusElement = document.getElementById("status");
+    const container = document.getElementById("player");
 
-<script type="module">
-const SOURCE = "/media";
+    function setStatus(message) {
+      statusElement.textContent = message;
+      console.log(message);
+    }
 
-const info =
-  document.getElementById("info");
-
-const container =
-  document.getElementById("player");
-
-function write(message) {
-  info.textContent += "\\n" + message;
-}
-
-function setInfo(message) {
-  info.textContent = message;
-}
-
-function testBrowser() {
-  const result = {
-    userAgent: navigator.userAgent,
-    crossOriginIsolated:
-      window.crossOriginIsolated,
-    sharedArrayBuffer:
-      typeof SharedArrayBuffer !== "undefined",
-    webCodecs:
-      typeof VideoDecoder !== "undefined",
-    videoDecoder:
-      typeof VideoDecoder !== "undefined",
-    audioDecoder:
-      typeof AudioDecoder !== "undefined",
-    hardwareConcurrency:
-      navigator.hardwareConcurrency || null,
-  };
-
-  setInfo(
-    JSON.stringify(
-      result,
-      null,
-      2
-    )
-  );
-
-  return result;
-}
-
-function resolveCodecName(codecId) {
-  if (
-    typeof AVCodecID === "undefined"
-  ) {
-    return "unknown";
-  }
-
-  const names = {
-    [AVCodecID.AV_CODEC_ID_HEVC]:
-      "HEVC",
-    [AVCodecID.AV_CODEC_ID_OPUS]:
-      "Opus",
-  };
-
-  return names[codecId] || "unknown";
-}
-
-async function createPlayer() {
-  if (
-    typeof AVPlayer === "undefined"
-  ) {
-    throw new Error(
-      "libmedia AVPlayer failed to load."
-    );
-  }
-
-  write("");
-  write(
-    "libmedia AVPlayer loaded."
-  );
-
-  const player =
-    new AVPlayer({
-      container,
-
-      getWasm(
-        type,
-        codecId,
-        mediaType
+    function getCodecName(codecId) {
+      if (
+        typeof AVCodecID !== "undefined" &&
+        codecId === AVCodecID.AV_CODEC_ID_HEVC
       ) {
-        if (
-          type === "decoder"
-        ) {
-          if (
-            codecId ===
-            AVCodecID.AV_CODEC_ID_HEVC
-          ) {
-            write(
-              "HEVC WASM requested: SIMD"
-            );
+        return "HEVC";
+      }
 
-            return (
-              "https://cdn.jsdelivr.net/gh/" +
-              "zhaohappy/libmedia@latest/" +
-              "dist/decode/hevc-simd.wasm"
-            );
+      if (
+        typeof AVCodecID !== "undefined" &&
+        codecId === AVCodecID.AV_CODEC_ID_OPUS
+      ) {
+        return "Opus";
+      }
+
+      return String(codecId);
+    }
+
+    async function createPlayer() {
+      if (typeof AVPlayer === "undefined") {
+        throw new Error(
+          "AVPlayer global is unavailable. libmedia UMD did not load correctly.",
+        );
+      }
+
+      setStatus(
+        "libmedia loaded\\n" +
+        "crossOriginIsolated: " + crossOriginIsolated + "\\n" +
+        "SharedArrayBuffer: " + ("SharedArrayBuffer" in window),
+      );
+
+      const player = new AVPlayer({
+        container,
+
+        getWasm(type, codecId, mediaType) {
+          console.log(
+            "getWasm:",
+            type,
+            getCodecName(codecId),
+            mediaType,
+          );
+
+          if (type === "decoder") {
+            switch (codecId) {
+              case AVCodecID.AV_CODEC_ID_HEVC:
+                return "/libmedia-wasm/decode/hevc-simd.wasm";
+
+              case AVCodecID.AV_CODEC_ID_H264:
+                return "/libmedia-wasm/decode/h264-simd.wasm";
+
+              case AVCodecID.AV_CODEC_ID_AAC:
+                return "/libmedia-wasm/decode/aac-simd.wasm";
+
+              case AVCodecID.AV_CODEC_ID_MP3:
+                return "/libmedia-wasm/decode/mp3-simd.wasm";
+
+              case AVCodecID.AV_CODEC_ID_FLAC:
+                return "/libmedia-wasm/decode/flac-simd.wasm";
+            }
           }
 
-          if (
-            codecId ===
-            AVCodecID.AV_CODEC_ID_OPUS
-          ) {
-            write(
-              "Opus WASM requested: SIMD"
-            );
-
-            return (
-              "https://cdn.jsdelivr.net/gh/" +
-              "zhaohappy/libmedia@latest/" +
-              "dist/decode/opus-simd.wasm"
-            );
+          if (type === "resampler") {
+            return "/libmedia-wasm/resample/resample-simd.wasm";
           }
 
-          write(
-            "WASM requested for codec: " +
-            resolveCodecName(
-              codecId
-            )
-          );
-        }
+          if (type === "stretchpitcher") {
+            return "/libmedia-wasm/stretchpitch/stretchpitch-simd.wasm";
+          }
 
-        if (
-          type === "resampler"
-        ) {
-          return (
-            "https://cdn.jsdelivr.net/gh/" +
-            "zhaohappy/libmedia@latest/" +
-            "dist/resample/resample-simd.wasm"
-          );
-        }
+          return undefined;
+        },
+      });
 
-        return undefined;
-      },
+      setStatus("Player created. Loading MKV...");
+
+      await player.load(SOURCE);
+
+      setStatus("MKV loaded. Starting playback...");
+
+      await player.play();
+
+      setStatus("Playing.");
+    }
+
+    createPlayer().catch((error) => {
+      console.error(error);
+
+      setStatus(
+        "ERROR\\n\\n" +
+        (error && error.stack
+          ? error.stack
+          : String(error)),
+      );
     });
-
-  write(
-    "Loading MKV…"
-  );
-
-  await player.load(SOURCE);
-
-  write(
-    "MKV loaded."
-  );
-
-  write(
-    "Starting playback…"
-  );
-
-  await player.play();
-
-  write(
-    "PLAYING"
-  );
-
-  return player;
-}
-
-async function main() {
-  testBrowser();
-
-  try {
-    await createPlayer();
-  } catch (error) {
-    console.error(error);
-
-    write("");
-    write(
-      "ERROR: " +
-      (
-        error?.stack ||
-        error?.message ||
-        String(error)
-      )
-    );
-  }
-}
-
-main();
-</script>
-
+  </script>
 </body>
 </html>`;
 }
 
 export default {
   async fetch(request, env) {
-    const url =
-      new URL(request.url);
+    const url = new URL(request.url);
 
-    if (
-      request.method === "OPTIONS"
-    ) {
-      return new Response(null, {
-        status: 204,
-        headers: corsHeaders(),
+    try {
+      if (request.method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            ...securityHeaders(),
+          },
+        });
+      }
+
+      if (url.pathname === "/") {
+        return new Response(playerHtml(), {
+          headers: htmlHeaders(),
+        });
+      }
+
+      if (url.pathname === "/api/check") {
+        return checkLoli(env);
+      }
+
+      if (url.pathname === "/media") {
+        return proxyMedia(request, env);
+      }
+
+      if (url.pathname.startsWith("/libmedia/")) {
+        return proxyLibmedia(
+          request,
+          url.pathname.substring("/libmedia/".length),
+        );
+      }
+
+      if (url.pathname.startsWith("/libmedia-wasm/")) {
+        return proxyWasm(
+          request,
+          url.pathname.substring("/libmedia-wasm/".length),
+        );
+      }
+
+      return new Response("Not Found", {
+        status: 404,
+        headers: securityHeaders(),
       });
-    }
+    } catch (error) {
+      console.error(error);
 
-    if (url.pathname === "/") {
       return new Response(
-        playerPage(),
+        error instanceof Error
+          ? error.stack || error.message
+          : String(error),
         {
-          headers: pageHeaders(),
-        }
+          status: 500,
+          headers: {
+            "Content-Type": "text/plain; charset=utf-8",
+            ...securityHeaders(),
+          },
+        },
       );
     }
-
-    if (
-      url.pathname === "/media"
-    ) {
-      if (
-        request.method !== "GET" &&
-        request.method !== "HEAD"
-      ) {
-        return new Response(
-          "Method Not Allowed",
-          {
-            status: 405,
-          }
-        );
-      }
-
-      try {
-        const response =
-          await sourceRequest(
-            env,
-            request
-          );
-
-        const headers =
-          corsHeaders(
-            response.headers
-          );
-
-        headers.set(
-          "Accept-Ranges",
-          "bytes"
-        );
-
-        headers.set(
-          "Cache-Control",
-          "no-store"
-        );
-
-        return new Response(
-          response.body,
-          {
-            status: response.status,
-            statusText:
-              response.statusText,
-            headers,
-          }
-        );
-      } catch (error) {
-        console.error(error);
-
-        return new Response(
-          JSON.stringify({
-            ok: false,
-            error:
-              error?.message ||
-              String(error),
-          }),
-          {
-            status: 502,
-            headers: corsHeaders({
-              "Content-Type":
-                "application/json",
-            }),
-          }
-        );
-      }
-    }
-
-    if (
-      url.pathname === "/api/check"
-    ) {
-      try {
-        const response =
-          await env.LOLI.fetch(
-            new Request(
-              SOURCE_URL,
-              {
-                method: "GET",
-                headers: {
-                  Range:
-                    "bytes=0-1023",
-                  "User-Agent":
-                    SAFARI_UA,
-                },
-              }
-            )
-          );
-
-        return new Response(
-          JSON.stringify({
-            ok: response.ok,
-            status:
-              response.status,
-            contentType:
-              response.headers.get(
-                "Content-Type"
-              ),
-            contentLength:
-              response.headers.get(
-                "Content-Length"
-              ),
-            contentRange:
-              response.headers.get(
-                "Content-Range"
-              ),
-            acceptRanges:
-              response.headers.get(
-                "Accept-Ranges"
-              ),
-          }),
-          {
-            headers: corsHeaders({
-              "Content-Type":
-                "application/json",
-              "Cache-Control":
-                "no-store",
-            }),
-          }
-        );
-      } catch (error) {
-        return new Response(
-          JSON.stringify({
-            ok: false,
-            error:
-              error?.message ||
-              String(error),
-          }),
-          {
-            status: 502,
-            headers: corsHeaders({
-              "Content-Type":
-                "application/json",
-            }),
-          }
-        );
-      }
-    }
-
-    return new Response(
-      "Not Found",
-      {
-        status: 404,
-        headers: corsHeaders(),
-      }
-    );
   },
 };
