@@ -15,7 +15,7 @@ const LIBMEDIA_AVUTIL_CDN =
   `https://cdn.jsdelivr.net/npm/@libmedia/avutil@${LIBMEDIA_VERSION}`;
 
 const LIBMEDIA_ROOT_CDN =
-  `https://cdn.jsdelivr.net/npm/@libmedia/avplayer@${LIBMEDIA_VERSION}`;
+  `https://cdn.jsdelivr.net/gh/zhaohappy/libmedia@v${LIBMEDIA_VERSION}`;
 
 function securityHeaders() {
   return {
@@ -33,14 +33,31 @@ function htmlHeaders() {
   };
 }
 
+function invalidPath(message) {
+  return new Response(message, {
+    status: 400,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      ...securityHeaders(),
+    },
+  });
+}
+
+function errorResponse(message, status) {
+  return new Response(message, {
+    status,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      ...securityHeaders(),
+    },
+  });
+}
+
 async function proxyJavascript(request, path) {
   const cleanPath = path.replace(/^\/+/, "");
 
   if (!cleanPath || cleanPath.includes("..")) {
-    return new Response("Invalid libmedia path", {
-      status: 400,
-      headers: securityHeaders(),
-    });
+    return invalidPath("Invalid libmedia path");
   }
 
   const response = await fetch(
@@ -52,12 +69,9 @@ async function proxyJavascript(request, path) {
   );
 
   if (!response.ok) {
-    return new Response(
+    return errorResponse(
       `libmedia AVPlayer error: ${response.status} ${response.statusText}`,
-      {
-        status: response.status,
-        headers: securityHeaders(),
-      },
+      response.status,
     );
   }
 
@@ -80,6 +94,7 @@ async function proxyJavascript(request, path) {
 
   return new Response(response.body, {
     status: response.status,
+    statusText: response.statusText,
     headers,
   });
 }
@@ -88,10 +103,7 @@ async function proxyAvutil(request, path) {
   const cleanPath = path.replace(/^\/+/, "");
 
   if (!cleanPath || cleanPath.includes("..")) {
-    return new Response("Invalid avutil path", {
-      status: 400,
-      headers: securityHeaders(),
-    });
+    return invalidPath("Invalid avutil path");
   }
 
   const response = await fetch(
@@ -103,12 +115,9 @@ async function proxyAvutil(request, path) {
   );
 
   if (!response.ok) {
-    return new Response(
+    return errorResponse(
       `libmedia AVUtil error: ${response.status} ${response.statusText}`,
-      {
-        status: response.status,
-        headers: securityHeaders(),
-      },
+      response.status,
     );
   }
 
@@ -131,6 +140,7 @@ async function proxyAvutil(request, path) {
 
   return new Response(response.body, {
     status: response.status,
+    statusText: response.statusText,
     headers,
   });
 }
@@ -139,27 +149,25 @@ async function proxyWasm(request, path) {
   const cleanPath = path.replace(/^\/+/, "");
 
   if (!cleanPath || cleanPath.includes("..")) {
-    return new Response("Invalid WASM path", {
-      status: 400,
-      headers: securityHeaders(),
-    });
+    return invalidPath("Invalid WASM path");
   }
 
-  const allowed = [
+  const allowedPrefixes = [
     "decode/",
     "resample/",
     "stretchpitch/",
   ];
 
-  if (!allowed.some((prefix) => cleanPath.startsWith(prefix))) {
-    return new Response("Invalid WASM path", {
-      status: 400,
-      headers: securityHeaders(),
-    });
+  if (
+    !allowedPrefixes.some((prefix) =>
+      cleanPath.startsWith(prefix),
+    )
+  ) {
+    return invalidPath("Invalid WASM path");
   }
 
   const response = await fetch(
-    `${LIBMEDIA_CDN}/dist/${cleanPath}`,
+    `${LIBMEDIA_ROOT_CDN}/dist/${cleanPath}`,
     {
       method: request.method,
       headers: request.headers,
@@ -167,22 +175,24 @@ async function proxyWasm(request, path) {
   );
 
   if (!response.ok) {
-    return new Response(
+    return errorResponse(
       `WASM error: ${response.status} ${response.statusText}`,
-      {
-        status: response.status,
-        headers: securityHeaders(),
-      },
+      response.status,
     );
   }
 
   const headers = new Headers(response.headers);
 
-  headers.set("Content-Type", "application/wasm");
+  headers.set(
+    "Content-Type",
+    "application/wasm",
+  );
+
   headers.set(
     "Cache-Control",
     "public, max-age=31536000, immutable",
   );
+
   headers.set(
     "Cross-Origin-Resource-Policy",
     "same-origin",
@@ -190,6 +200,7 @@ async function proxyWasm(request, path) {
 
   return new Response(response.body, {
     status: response.status,
+    statusText: response.statusText,
     headers,
   });
 }
@@ -199,15 +210,30 @@ async function proxyMedia(request, env) {
 
   headers.delete("host");
 
-  const response = await env.LOLI.fetch(SOURCE_URL, {
-    method: request.method,
-    headers,
-  });
+  const response = await env.LOLI.fetch(
+    SOURCE_URL,
+    {
+      method: request.method,
+      headers,
+    },
+  );
 
-  const outputHeaders = new Headers(response.headers);
+  const outputHeaders = new Headers(
+    response.headers,
+  );
 
   outputHeaders.set(
     "Access-Control-Allow-Origin",
+    "*",
+  );
+
+  outputHeaders.set(
+    "Access-Control-Allow-Methods",
+    "GET, HEAD, OPTIONS",
+  );
+
+  outputHeaders.set(
+    "Access-Control-Allow-Headers",
     "*",
   );
 
@@ -235,22 +261,29 @@ async function proxyMedia(request, env) {
 }
 
 async function checkLoli(env) {
-  const response = await env.LOLI.fetch(SOURCE_URL, {
-    method: "GET",
-    headers: {
-      Range: "bytes=0-1023",
+  const response = await env.LOLI.fetch(
+    SOURCE_URL,
+    {
+      method: "GET",
+      headers: {
+        Range: "bytes=0-1023",
+      },
     },
-  });
+  );
 
   return Response.json(
     {
       ok: response.ok,
       status: response.status,
       statusText: response.statusText,
-      contentType: response.headers.get("content-type"),
-      contentLength: response.headers.get("content-length"),
-      contentRange: response.headers.get("content-range"),
-      acceptRanges: response.headers.get("accept-ranges"),
+      contentType:
+        response.headers.get("content-type"),
+      contentLength:
+        response.headers.get("content-length"),
+      contentRange:
+        response.headers.get("content-range"),
+      acceptRanges:
+        response.headers.get("accept-ranges"),
     },
     {
       headers: {
@@ -307,19 +340,14 @@ function playerHtml() {
       left: 12px;
       right: 12px;
       bottom: 12px;
-
       max-height: 50vh;
       overflow: auto;
-
       padding: 10px 12px;
       border-radius: 10px;
-
       background: rgba(0, 0, 0, 0.8);
-
       color: #fff;
       font-size: 13px;
       line-height: 1.45;
-
       white-space: pre-wrap;
       word-break: break-word;
     }
@@ -409,12 +437,11 @@ function playerHtml() {
       const player = new AVPlayer({
         container,
 
-        getWasm(type, codecId, mediaType) {
+        getWasm(type, codecId) {
           console.log(
             "getWasm:",
             type,
             codecId,
-            mediaType,
           );
 
           if (type === "decoder") {
@@ -516,7 +543,11 @@ export default {
         return proxyMedia(request, env);
       }
 
-      if (url.pathname.startsWith("/libmedia-avutil/")) {
+      if (
+        url.pathname.startsWith(
+          "/libmedia-avutil/",
+        )
+      ) {
         return proxyAvutil(
           request,
           url.pathname.substring(
@@ -525,7 +556,11 @@ export default {
         );
       }
 
-      if (url.pathname.startsWith("/libmedia-wasm/")) {
+      if (
+        url.pathname.startsWith(
+          "/libmedia-wasm/",
+        )
+      ) {
         return proxyWasm(
           request,
           url.pathname.substring(
@@ -534,7 +569,11 @@ export default {
         );
       }
 
-      if (url.pathname.startsWith("/libmedia/")) {
+      if (
+        url.pathname.startsWith(
+          "/libmedia/",
+        )
+      ) {
         return proxyJavascript(
           request,
           url.pathname.substring(
