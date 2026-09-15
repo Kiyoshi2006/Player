@@ -1,0 +1,14 @@
+{
+  "name": "mkv-cloudflare-player",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Cloudflare Worker proxy + iPhone-friendly MKV/HEVC player.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "wrangler types"
+  },
+  "devDependencies": {
+    "wrangler": "^4.38.0"
+  }
+}
